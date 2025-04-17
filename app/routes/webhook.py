@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 import requests
-from app.config import WHATSAPP_TOKEN, PHONE_NUMBER_ID
+from app.config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID
 
 router = APIRouter()
 
@@ -38,7 +38,7 @@ async def receive_message(request: Request):
     return {"status": "received"}
 
 def send_whatsapp_message(to: str, message: str):
-    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
