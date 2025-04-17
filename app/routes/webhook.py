@@ -3,7 +3,7 @@ from fastapi.responses import PlainTextResponse
 import requests
 
 from app.config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID
-from services.gemini import ask_gemini  # 👈 importamos Gemini
+from app.services.gemini import ask_gemini  # ✅ Import corregido
 
 router = APIRouter()
 VERIFY_TOKEN = "gemini-bot-token"
@@ -27,15 +27,17 @@ async def receive_message(request: Request):
 
         if messages:
             message = messages[0]
-            text = message['text']['body']
-            from_number = message['from']  # Número del usuario
+            text = message.get('text', {}).get('body')
+            from_number = message.get('from')
 
-            # ✨ Enviar mensaje a Gemini
-            respuesta = await ask_gemini(text)
+            if text and from_number:
+                # ✨ Pregunta a Gemini
+                respuesta = await ask_gemini(text)
 
-            # Enviar respuesta de Gemini por WhatsApp
-            send_whatsapp_message(from_number, respuesta)
-
+                # ✅ Envía respuesta al usuario
+                send_whatsapp_message(from_number, respuesta)
+            else:
+                print("Mensaje no contiene texto o número de origen válido.")
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
