@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 import requests
+
 from app.config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID
+from services.gemini import ask_gemini  # 👈 importamos Gemini
 
 router = APIRouter()
-
 VERIFY_TOKEN = "gemini-bot-token"
 
 @router.get("/webhook")
@@ -29,9 +30,12 @@ async def receive_message(request: Request):
             text = message['text']['body']
             from_number = message['from']  # Número del usuario
 
-            # Respuesta automática
-            send_whatsapp_message(from_number, "¡Hola! Gracias por tu mensaje. ¿En qué te puedo ayudar?")
-    
+            # ✨ Enviar mensaje a Gemini
+            respuesta = await ask_gemini(text)
+
+            # Enviar respuesta de Gemini por WhatsApp
+            send_whatsapp_message(from_number, respuesta)
+
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
@@ -51,5 +55,6 @@ def send_whatsapp_message(to: str, message: str):
             "body": message
         }
     }
+
     response = requests.post(url, headers=headers, json=data)
     print("Respuesta enviada:", response.status_code, response.text)
