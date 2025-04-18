@@ -69,7 +69,7 @@ def send_whatsapp_message(to: str, message: str, button=False):
     }
 
     if button:
-        # Estructura para enviar un botón de acción
+        # Estructura para enviar un botón de enlace
         data = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -80,8 +80,8 @@ def send_whatsapp_message(to: str, message: str, button=False):
                 "action": {
                     "buttons": [
                         {
-                            "type": "url",  # Este tipo es para el enlace
-                            "text": "Visitar Sitio Web",  # El texto del botón
+                            "type": "url",  # Aquí definimos que es un botón de tipo URL
+                            "title": "Visitar Sitio Web",  # El texto del botón
                             "url": "https://daniseo.site"  # El enlace al que debe ir el botón
                         }
                     ]
