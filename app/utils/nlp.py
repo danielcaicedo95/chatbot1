@@ -1,4 +1,4 @@
-from app.clients.gemini import ask_gemini_with_history  # Usa la función correcta
+from app.clients.gemini import ask_gemini_with_history
 
 def extract_keywords(text: str, keywords: list[str]) -> list[str]:
     """
@@ -17,8 +17,10 @@ def quiere_ver_todos_los_productos(texto: str) -> bool:
         "quiero ver todos los productos",
         "enséñame los productos",
         "qué productos tienes",
+        "que productos tienes",
         "todo el catálogo",
         "qué vendes",
+        "que vendes",
         "qué hay disponible",
         "ver catálogo",
         "ver todos los productos",
@@ -30,14 +32,21 @@ def quiere_ver_todos_los_productos(texto: str) -> bool:
 
 async def detecta_pedido_de_productos(texto_usuario: str) -> bool:
     """
-    Usa IA para detectar si el usuario quiere ver todos los productos, si las frases no lo indican claramente.
+    Usando IA, detecta si el usuario está pidiendo ver todos los productos
+    (solo si las frases comunes no fueron suficientes).
     """
+    # 1) Si coincide con alguna frase común, devolvemos True
     if quiere_ver_todos_los_productos(texto_usuario):
         return True
 
+    # 2) Si no, preguntamos a Gemini con un prompt simple
     prompt = (
-        f"¿El siguiente mensaje indica que el usuario quiere ver todos los productos disponibles en una tienda? "
-        f"Responde solo con 'sí' o 'no':\n\n{texto_usuario}"
+        "¿El siguiente mensaje indica que el usuario quiere ver todos "
+        "los productos disponibles en una tienda? Responde solo con 'sí' o 'no':\n\n"
+        f"{texto_usuario}"
     )
-    respuesta = await ask_gemini_with_history(prompt)  # Cambiado a la función correcta
+
+    # Para llamar a Gemini, usamos la misma función que tu flujo principal
+    # pero pasando un historial mínimo con un solo mensaje de usuario.
+    respuesta = await ask_gemini_with_history([{"role": "user", "text": prompt}])
     return "sí" in respuesta.lower()
