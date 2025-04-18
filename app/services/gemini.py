@@ -9,7 +9,7 @@ async def ask_gemini_with_history(prompt: str) -> str:
 
     # Añadir el nuevo mensaje al historial
     message_history.append({
-        "parts": [{"text": prompt}]
+        "parts": {"text": prompt}  # Cambié esto para que "parts" sea un objeto en lugar de una lista
     })
 
     # Limitamos el tamaño del historial a 15 mensajes
