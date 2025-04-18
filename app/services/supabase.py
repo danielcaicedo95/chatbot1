@@ -1,25 +1,24 @@
-import os
+# app/services/supabase.py
+
 import httpx
 from datetime import datetime
+from app.core.config import SUPABASE_URL, SUPABASE_KEY
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY")
-
-async def save_message_to_supabase(user_id: str, role: str, message: str):
-    url = f"{SUPABASE_URL}/rest/v1/chat_messages"
+async def save_message_to_supabase(phone_number: str, role: str, text: str):
+    url = f"{SUPABASE_URL}/rest/v1/messages"        # ↪️ tu tabla se llama "messages"
     headers = {
-        "apikey": SUPABASE_API_KEY,
-        "Authorization": f"Bearer {SUPABASE_API_KEY}",
+        "apikey": SUPABASE_KEY,                     # ↪️ usa SUPABASE_KEY
+        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
     payload = {
-        "user_id": user_id,
+        "phone_number": phone_number,
         "role": role,
-        "message": message,
+        "text": text,
         "timestamp": datetime.utcnow().isoformat()
     }
 
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=headers)
-        print("Mensaje guardado en Supabase:", response.status_code, response.text)
+        resp = await client.post(url, json=payload, headers=headers)
+        print("Mensaje guardado en Supabase:", resp.status_code, resp.text)

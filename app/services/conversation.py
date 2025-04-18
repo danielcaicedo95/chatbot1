@@ -1,6 +1,9 @@
+# app/services/conversation.py
+
 from app.utils.memory import user_histories
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
+from app.services.supabase import save_message_to_supabase  # ↪️ Import agregado
 
 async def handle_user_message(body: dict):
     try:
@@ -9,24 +12,33 @@ async def handle_user_message(body: dict):
         value = changes['value']
         messages = value.get('messages')
 
-        if messages:
-            msg = messages[0]
-            text = msg.get('text', {}).get('body')
-            from_number = msg.get('from')
+        if not messages:
+            return
 
-            if not text or not from_number:
-                print("Mensaje sin texto o número inválido.")
-                return
+        msg = messages[0]
+        text = msg.get('text', {}).get('body')
+        from_number = msg.get('from')
 
-            user_histories[from_number].append({"role": "user", "text": text})
+        if not text or not from_number:
+            print("Mensaje sin texto o número inválido.")
+            return
 
-            history = list(user_histories[from_number])
+        # 1) Memoria RAM
+        user_histories[from_number].append({"role": "user", "text": text})
+        # 2) Guardar en Supabase (usuario)
+        await save_message_to_supabase(from_number, "user", text)
 
-            respuesta = await ask_gemini_with_history(history)
+        # 3) Generar respuesta
+        history = list(user_histories[from_number])
+        respuesta = await ask_gemini_with_history(history)
 
-            user_histories[from_number].append({"role": "model", "text": respuesta})
+        # 4) Memoria RAM
+        user_histories[from_number].append({"role": "model", "text": respuesta})
+        # 5) Guardar en Supabase (bot)
+        await save_message_to_supabase(from_number, "model", respuesta)
 
-            send_whatsapp_message(from_number, respuesta)
+        # 6) Enviar respuesta al usuario
+        send_whatsapp_message(from_number, respuesta)
 
     except Exception as e:
         print("Error procesando el mensaje:", e)
