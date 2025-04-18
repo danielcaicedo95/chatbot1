@@ -49,9 +49,10 @@ async def handle_user_message(body: dict):
 
             print("📦 Texto final con productos:", productos_texto)
 
+            # Añadir los productos al historial para que Gemini los use
             user_histories[from_number].append({
-                "role": "user",
-                "text": f"(Contexto del sistema para ayudarte): {productos_texto}"
+                "role": "system",
+                "text": productos_texto  # Este es el contexto con los productos
             })
 
         # 5) Generar respuesta de Gemini con historial actualizado
