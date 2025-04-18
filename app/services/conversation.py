@@ -43,17 +43,22 @@ async def handle_user_message(body: dict):
 
         # 📦 4) Si hay productos, formatearlos como contexto adicional
         if productos:
-            productos_texto = "🛍️ Productos relacionados con lo que preguntaste:\n\n"
+            productos_texto = "🛍️ Estos son los productos disponibles en la tienda:\n\n"
             for prod in productos:
                 productos_texto += f"- {prod['name']}: {prod['description']}. Precio: ${prod['price']}. Stock: {prod['stock']}\n"
 
             print("📦 Texto final con productos:", productos_texto)
 
-            # Añadir los productos al historial como mensaje de usuario
-            user_histories[from_number].append({
-                "role": "user",  # Mantener el rol de usuario
-                "text": productos_texto  # Texto con los productos encontrados
-            })
+            # Reemplazar el mensaje original con una versión ampliada
+            mensaje_con_contexto = (
+                f"{text}\n\n"
+                f"(Responde únicamente usando la siguiente información de productos disponibles en tienda):\n"
+                f"{productos_texto}"
+            )
+
+            # Reemplazar el último mensaje de usuario en la memoria
+            user_histories[from_number][-1] = {"role": "user", "text": mensaje_con_contexto}
+
 
         # 5) Generar respuesta de Gemini con historial actualizado
         history = list(user_histories[from_number])
