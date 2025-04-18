@@ -3,7 +3,7 @@ from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
 from app.services.products import search_products_by_keyword
-from app.utils.nlp import extract_keywords  # ✅ NUEVO
+from app.utils.nlp import extract_keywords, quiere_ver_todos_los_productos, detecta_pedido_de_productos  # ✅ NUEVO
 
 async def handle_user_message(body: dict):
     try:
@@ -29,17 +29,24 @@ async def handle_user_message(body: dict):
         # 2) Guardar en Supabase (usuario)
         await save_message_to_supabase(from_number, "user", text)
 
-        # 🔍 3) Buscar productos por palabra clave
-        keywords_en_catalogo = ["tequila", "cerveza", "ron", "aguardiente", "whisky", "vino", "ginebra"]
-        palabras_clave = extract_keywords(text, keywords_en_catalogo)
-
+        # 🔍 3) Buscar productos
         productos = []
-        for kw in palabras_clave:
-            productos = await search_products_by_keyword(kw)
-            print(f"📦 Buscando productos con keyword: {kw}")
-            print("📦 Productos encontrados:", productos)
-            if productos:
-                break  # si encuentra algo, se detiene
+        keywords_en_catalogo = ["tequila", "cerveza", "ron", "aguardiente", "whisky", "vino", "ginebra"]
+
+        # Si el usuario quiere ver todos los productos
+        quiere_ver_todo = await detecta_pedido_de_productos(text)  # ✅ Usamos IA para confirmar si es un pedido para todos los productos
+
+        if quiere_ver_todo:
+            productos = await search_products_by_keyword("")  # Sin keyword, trae todos los productos
+            print("📦 Buscando TODOS los productos")
+        else:
+            palabras_clave = extract_keywords(text, keywords_en_catalogo)
+            for kw in palabras_clave:
+                productos = await search_products_by_keyword(kw)
+                print(f"📦 Buscando productos con keyword: {kw}")
+                print("📦 Productos encontrados:", productos)
+                if productos:
+                    break  # si encuentra algo, se detiene
 
         # 📦 4) Si hay productos, formatearlos como contexto adicional
         if productos:
@@ -58,7 +65,6 @@ async def handle_user_message(body: dict):
 
             # Reemplazar el último mensaje de usuario en la memoria
             user_histories[from_number][-1] = {"role": "user", "text": mensaje_con_contexto}
-
 
         # 5) Generar respuesta de Gemini con historial actualizado
         history = list(user_histories[from_number])
