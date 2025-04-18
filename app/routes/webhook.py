@@ -1,3 +1,4 @@
+# app/routes/webhook.py
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 import requests
@@ -28,11 +29,14 @@ async def receive_message(request: Request):
         changes = entry['changes'][0]
         value = changes['value']
         messages = value.get('messages')
+        contacts = value.get('contacts')
 
         if messages:
             msg = messages[0]
             text = msg.get('text', {}).get('body')
             from_number = msg.get('from')
+            # Extraer nombre de perfil del contacto si está disponible
+            user_name = contacts[0]['profile']['name'] if contacts and contacts[0].get('profile') else None
 
             if not text or not from_number:
                 print("Mensaje sin texto o número inválido.")
@@ -50,58 +54,19 @@ async def receive_message(request: Request):
             # 4) Guardamos la respuesta del asistente
             user_histories[from_number].append({"role": "model", "text": respuesta})
 
-            # 5) Enviamos la respuesta por WhatsApp
+            # 5) Enviamos la respuesta de texto
             send_whatsapp_message(from_number, respuesta)
 
-            # 6) Enviamos botón con link a la tienda
-            send_whatsapp_button_url(from_number)
+            # 6) Enviamos plantilla con botón CTA (URL)
+            send_template_cta(from_number, user_name)
 
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
     return {"status": "received"}
 
-def send_whatsapp_message(to: str, message: str, button=False):
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
 
-    if button:
-        # Estructura para enviar un botón de enlace
-        data = {
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "interactive",
-            "interactive": {
-                "type": "button",
-                "body": {"text": message},  # El mensaje que precede al botón
-                "action": {
-                    "buttons": [
-                        {
-                            "type": "url",  # Aquí definimos que es un botón de tipo URL
-                            "title": "Visitar Sitio Web",  # El texto del botón
-                            "url": "https://daniseo.site"  # El enlace al que debe ir el botón
-                        }
-                    ]
-                }
-            }
-        }
-    else:
-        # Solo se envía un mensaje de texto normal
-        data = {
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "text",
-            "text": {"body": message}
-        }
-
-    resp = requests.post(url, headers=headers, json=data)
-    print("Respuesta enviada:", resp.status_code, resp.text)
-
-
-def send_whatsapp_button_url(to: str):
+def send_whatsapp_message(to: str, message: str):
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -110,22 +75,35 @@ def send_whatsapp_button_url(to: str):
     data = {
         "messaging_product": "whatsapp",
         "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": "¿Te gustaría ver nuestros productos?"
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "url",
-                        "url": "https://tu-tienda.com",  # Reemplaza con tu URL real
-                        "title": "Visitar tienda"
-                    }
-                ]
-            }
-        }
+        "type": "text",
+        "text": {"body": message}
     }
     resp = requests.post(url, headers=headers, json=data)
-    print("Botón enviado:", resp.status_code, resp.text)
+    print("Respuesta enviada:", resp.status_code, resp.text)
+
+
+def send_template_cta(to: str, user_name: str = ""):  # Envía plantilla de botón URL
+    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    template_data = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": "visit_website",       # Nombre de la plantilla aprobada
+            "language": {"code": "es_CO"},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": user_name or ""}
+                    ]
+                }
+            ]
+        }
+    }
+    resp = requests.post(url, headers=headers, json=template_data)
+    print("Template CTA enviado:", resp.status_code, resp.text)
