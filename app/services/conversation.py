@@ -1,11 +1,9 @@
-# app/services/conversation.py
-
 from app.utils.memory import user_histories
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
 from app.services.products import search_products_by_keyword
-
+from app.utils.nlp import extract_keywords  # ✅ NUEVO
 
 async def handle_user_message(body: dict):
     try:
@@ -31,10 +29,17 @@ async def handle_user_message(body: dict):
         # 2) Guardar en Supabase (usuario)
         await save_message_to_supabase(from_number, "user", text)
 
-        # 🔍 3) Buscar productos relacionados con el mensaje
-        productos = await search_products_by_keyword(text)
-        print("🔍 Resultado productos:", productos)
+        # 🔍 3) Buscar productos por palabra clave
+        keywords_en_catalogo = ["tequila", "cerveza", "ron", "aguardiente", "whisky", "vino", "ginebra"]
+        palabras_clave = extract_keywords(text, keywords_en_catalogo)
 
+        productos = []
+        for kw in palabras_clave:
+            productos = await search_products_by_keyword(kw)
+            print(f"📦 Buscando productos con keyword: {kw}")
+            print("📦 Productos encontrados:", productos)
+            if productos:
+                break  # si encuentra algo, se detiene
 
         # 📦 4) Si hay productos, formatearlos como contexto adicional
         if productos:
@@ -45,11 +50,9 @@ async def handle_user_message(body: dict):
             print("📦 Texto final con productos:", productos_texto)
 
             user_histories[from_number].append({
-                    "role": "user",
-                    "text": f"(Contexto del sistema para ayudarte): {productos_texto}"
-                })
-
-
+                "role": "user",
+                "text": f"(Contexto del sistema para ayudarte): {productos_texto}"
+            })
 
         # 5) Generar respuesta de Gemini con historial actualizado
         history = list(user_histories[from_number])
