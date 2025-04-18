@@ -33,17 +33,22 @@ async def handle_user_message(body: dict):
 
         # 🔍 3) Buscar productos relacionados con el mensaje
         productos = await search_products_by_keyword(text)
+        print("🔍 Resultado productos:", productos)
+
 
         # 📦 4) Si hay productos, formatearlos como contexto adicional
         if productos:
-            productos_texto = "Estos son algunos productos relacionados disponibles:\n\n"
+            productos_texto = "🛍️ Productos relacionados con lo que preguntaste:\n\n"
             for prod in productos:
                 productos_texto += f"- {prod['name']}: {prod['description']}. Precio: ${prod['price']}. Stock: {prod['stock']}\n"
-            # Agregarlo a la historia como un mensaje adicional (del sistema)
+
+            print("📦 Texto final con productos:", productos_texto)
+
             user_histories[from_number].append({
-                "role": "user",  # Esto es importante: Gemini lo interpreta como parte del contexto previo
+                "role": "system",  # <- Este cambio es CLAVE
                 "text": productos_texto
             })
+
 
         # 5) Generar respuesta de Gemini con historial actualizado
         history = list(user_histories[from_number])

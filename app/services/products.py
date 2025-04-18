@@ -28,6 +28,17 @@ async def create_product(data: dict):
 
 async def search_products_by_keyword(keyword: str):
     url = f"{SUPABASE_URL}/rest/v1/products?name=ilike.*{keyword}*&select=*"
+    print("📦 Buscando productos con URL:", url)
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, headers=headers)
-        return resp.json()
+        print("📦 Respuesta Supabase:", resp.status_code, resp.text)
+
+        if resp.status_code != 200:
+            print("❌ Error al buscar productos.")
+            return []
+
+        data = resp.json()
+        print("📦 Productos encontrados:", data)
+        return data
+
