@@ -8,9 +8,7 @@ async def ask_gemini_with_history(prompt: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash-lite:generateContent?key={GOOGLE_API_KEY}"
 
     # Añadir el nuevo mensaje al historial
-    message_history.append({
-        "parts": {"text": prompt}  # Cambié esto para que "parts" sea un objeto en lugar de una lista
-    })
+    message_history.append({"content": prompt})  # Cambié esto para agregar directamente el contenido
 
     # Limitamos el tamaño del historial a 15 mensajes
     if len(message_history) > 15:
@@ -18,7 +16,7 @@ async def ask_gemini_with_history(prompt: str) -> str:
 
     # Preparamos el cuerpo con el historial de mensajes
     body = {
-        "contents": message_history
+        "contents": message_history  # No se usa "parts" sino "content" directamente
     }
 
     async with httpx.AsyncClient() as client:
@@ -28,7 +26,7 @@ async def ask_gemini_with_history(prompt: str) -> str:
 
         try:
             # Aquí extraemos la respuesta generada por Gemini
-            return result['candidates'][0]['content']['parts'][0]['text']
+            return result['candidates'][0]['content']
         except Exception as e:
             print("Error extrayendo respuesta de Gemini:", e)
             return "Lo siento, hubo un error generando la respuesta."
