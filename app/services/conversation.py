@@ -3,8 +3,8 @@
 from app.utils.memory import user_histories
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
-from app.services.supabase import save_message_to_supabase  # ↪️ Import agregado
-from app.services.products import search_products_by_keyword  # ↪️ Nuevo import
+from app.services.supabase import save_message_to_supabase
+from app.services.products import search_products_by_keyword
 
 
 async def handle_user_message(body: dict):
@@ -31,32 +31,31 @@ async def handle_user_message(body: dict):
         # 2) Guardar en Supabase (usuario)
         await save_message_to_supabase(from_number, "user", text)
 
-        # 3) Buscar productos relacionados con el mensaje del usuario
-        keyword = text.lower().strip()
-        products_found = await search_products_by_keyword(keyword)
+        # 🔍 3) Buscar productos relacionados con el mensaje
+        productos = await search_products_by_keyword(text)
 
-        # 4) Preparar historial con contexto si hay productos
-        history = list(user_histories[from_number])
-
-        if products_found:
-            product_text = "\n".join(
-                [f"- {p['name']}: {p.get('description', 'Sin descripción')}" for p in products_found]
-            )
-            history.append({
-                "role": "user",
-                "text": f"Estos son los productos disponibles relacionados con '{keyword}':\n{product_text}"
+        # 📦 4) Si hay productos, formatearlos como contexto adicional
+        if productos:
+            productos_texto = "Estos son algunos productos relacionados disponibles:\n\n"
+            for prod in productos:
+                productos_texto += f"- {prod['name']}: {prod['description']}. Precio: ${prod['price']}. Stock: {prod['stock']}\n"
+            # Agregarlo a la historia como un mensaje adicional (del sistema)
+            user_histories[from_number].append({
+                "role": "user",  # Esto es importante: Gemini lo interpreta como parte del contexto previo
+                "text": productos_texto
             })
 
-        # 5) Generar respuesta
+        # 5) Generar respuesta de Gemini con historial actualizado
+        history = list(user_histories[from_number])
         respuesta = await ask_gemini_with_history(history)
 
         # 6) Memoria RAM
         user_histories[from_number].append({"role": "model", "text": respuesta})
 
-        # 7) Guardar en Supabase (bot)
+        # 7) Guardar en Supabase (respuesta del bot)
         await save_message_to_supabase(from_number, "model", respuesta)
 
-        # 8) Enviar respuesta al usuario
+        # 8) Enviar respuesta por WhatsApp
         send_whatsapp_message(from_number, respuesta)
 
     except Exception as e:
