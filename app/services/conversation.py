@@ -3,7 +3,7 @@ from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
 from app.services.products import search_products_by_keyword
-from app.utils.nlp import extract_keywords, quiere_ver_todos_los_productos, detecta_pedido_de_productos  # ✅ NUEVO
+from app.utils.nlp import extract_keywords, detecta_pedido_de_productos  # ✅ NUEVO
 
 async def handle_user_message(body: dict):
     try:

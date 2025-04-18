@@ -12,9 +12,8 @@ async def ask_gemini_with_history(history_messages: list[dict]) -> str:
         "role": "user",  # Gemini no permite 'system'
         "parts": [{
             "text": (
-                "Eres un asesor de ventas experto en productos. Si te preguntan por algo específico o una categoría, "
-                "puedes mencionar productos relevantes. Haz preguntas estratégicas, guía la conversación de forma natural, "
-                "crea confianza y responde con empatía. Tu tono debe ser profesional, persuasivo, amable y natural — evita sonar robótico."
+                "Eres un vendedor de una licorera llamada licores el roble, "
+                
             )
         }]
     }
