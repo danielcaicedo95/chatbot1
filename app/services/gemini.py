@@ -2,20 +2,23 @@
 import httpx
 from app.config import GOOGLE_API_KEY
 
-async def ask_gemini_with_history(history_texts: list[str]) -> str:
+async def ask_gemini_with_history(history_messages: list[dict]) -> str:
     url = (
         "https://generativelanguage.googleapis.com"
         f"/v1/models/gemini-2.0-flash-lite:generateContent?key={GOOGLE_API_KEY}"
     )
 
-    # Cada entrada debe tener la forma {"parts":[{"text": "..."}]}
-    contents = [{"parts": [{"text": txt}]} for txt in history_texts]
+    # Construimos el array de contents con role + parts
+    contents = [
+        {"role": msg["role"], "parts": [{"text": msg["text"]}]}
+        for msg in history_messages
+    ]
 
     body = {"contents": contents}
 
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=body)
-        result = response.json()
+        resp = await client.post(url, json=body)
+        result = resp.json()
         print("Respuesta de Gemini:", result)
 
         try:

@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from app.config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID
 from app.services.gemini import ask_gemini_with_history  # Import actualizado
 
-# Memoria temporal en RAM: guarda hasta 15 textos por usuario
+# Memoria temporal en RAM: guarda hasta 15 mensajes (con role) por usuario
 user_histories = defaultdict(lambda: deque(maxlen=15))
 
 router = APIRouter()
@@ -31,27 +31,29 @@ async def receive_message(request: Request):
         messages = value.get('messages')
 
         if messages:
-            message = messages[0]
-            text = message.get('text', {}).get('body')
-            from_number = message.get('from')
+            msg = messages[0]
+            text = msg.get('text', {}).get('body')
+            from_number = msg.get('from')
 
-            if text and from_number:
-                # 1) Guardar el texto entrante en la memoria
-                user_histories[from_number].append(text)
-
-                # 2) Convertir la memoria en lista de textos
-                history_texts = list(user_histories[from_number])
-
-                # 3) Consultar a Gemini con todo el historial
-                respuesta = await ask_gemini_with_history(history_texts)
-
-                # 4) Guardar la respuesta en la memoria
-                user_histories[from_number].append(respuesta)
-
-                # 5) Enviar la respuesta por WhatsApp
-                send_whatsapp_message(from_number, respuesta)
-            else:
+            if not text or not from_number:
                 print("Mensaje sin texto o número inválido.")
+                return {"status": "ignored"}
+
+            # 1) Guardamos el mensaje del usuario
+            user_histories[from_number].append({"role": "user", "text": text})
+
+            # 2) Preparamos el historial completo
+            history = list(user_histories[from_number])  # cada item tiene role & text
+
+            # 3) Llamamos a Gemini con ese historial
+            respuesta = await ask_gemini_with_history(history)
+
+            # 4) Guardamos la respuesta del asistente
+            user_histories[from_number].append({"role": "model", "text": respuesta})
+
+            # 5) Enviamos la respuesta por WhatsApp
+            send_whatsapp_message(from_number, respuesta)
+
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
@@ -69,5 +71,5 @@ def send_whatsapp_message(to: str, message: str):
         "type": "text",
         "text": {"body": message}
     }
-    response = requests.post(url, headers=headers, json=data)
-    print("Respuesta enviada:", response.status_code, response.text)
+    resp = requests.post(url, headers=headers, json=data)
+    print("Respuesta enviada:", resp.status_code, resp.text)
