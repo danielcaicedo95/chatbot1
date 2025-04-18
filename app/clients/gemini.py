@@ -7,33 +7,42 @@ async def ask_gemini_with_history(history_messages: list[dict]) -> str:
         f"/v1/models/gemini-2.0-flash-lite:generateContent?key={GOOGLE_API_KEY}"
     )
 
+    # 🧠 Prompt inicial para guiar la conversación
     system_prompt = {
-        "role": "user",
-        "parts": [
-            {
-                "text": (
-                    "Si te preguntas que productos tienes busca en la base de datos tambien si te preguntan por algo especifico o un grupo de productos,"
-                    "Eres un asesor de ventas experto , "
-                    "haciendo preguntas estratégicas. Luego guías la conversación de forma natural, creando confianza. "
-                    "Finalmente, haces una oferta relevante y manejas objeciones con empatía, sin presionar. Tu tono es amable, profesional y persuasivo. "
-                    "Evita sonar robótico."
-                )
-            }
-        ]
+        "role": "user",  # Gemini no permite 'system'
+        "parts": [{
+            "text": (
+                "Eres un asesor de ventas experto en productos. Si te preguntan por algo específico o una categoría, "
+                "puedes mencionar productos relevantes. Haz preguntas estratégicas, guía la conversación de forma natural, "
+                "crea confianza y responde con empatía. Tu tono debe ser profesional, persuasivo, amable y natural — evita sonar robótico."
+            )
+        }]
     }
 
+    # 🧾 Construir el historial para enviar a Gemini
     contents = [system_prompt] + [
         {"role": msg["role"], "parts": [{"text": msg["text"]}]}
         for msg in history_messages
     ]
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, json={"contents": contents})
-        result = resp.json()
-        print("Respuesta de Gemini:", result)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, json={"contents": contents})
+            result = response.json()
 
-        try:
-            return result['candidates'][0]['content']['parts'][0]['text']
-        except Exception as e:
-            print("Error extrayendo respuesta de Gemini:", e)
-            return "Lo siento, hubo un error generando la respuesta."
+            print("🧠 Respuesta completa de Gemini:", result)
+
+            # ✅ Extraer texto de forma segura
+            if "candidates" in result and result["candidates"]:
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+
+            print("⚠️ Respuesta sin candidatos válidos.")
+            return "Lo siento, no pude generar una respuesta en este momento."
+
+    except httpx.HTTPError as e:
+        print("❌ Error HTTP al llamar a Gemini:", str(e))
+        return "Hubo un problema de conexión al generar la respuesta."
+
+    except Exception as e:
+        print("❌ Error inesperado en Gemini:", str(e))
+        return "Lo siento, ocurrió un error al generar la respuesta."
