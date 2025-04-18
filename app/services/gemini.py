@@ -1,4 +1,3 @@
-# app/services/gemini.py
 import httpx
 from app.config import GOOGLE_API_KEY
 
@@ -8,8 +7,23 @@ async def ask_gemini_with_history(history_messages: list[dict]) -> str:
         f"/v1/models/gemini-2.0-flash-lite:generateContent?key={GOOGLE_API_KEY}"
     )
 
-    # Construimos el array de contents con role + parts
-    contents = [
+    # 👉 Mensaje inicial del sistema (el rol del bot)
+    system_prompt = {
+        "role": "user",
+        "parts": [
+            {
+                "text": (
+                    "Eres un asesor de ventas experto que NO comienza vendiendo, sino identificando necesidades del cliente, "
+                    "haciendo preguntas estratégicas. Luego guías la conversación de forma natural, creando confianza. "
+                    "Finalmente, haces una oferta relevante y manejas objeciones con empatía, sin presionar. Tu tono es amable, profesional y persuasivo. "
+                    "Evita sonar robótico."
+                )
+            }
+        ]
+    }
+
+    # 👉 Insertamos el system_prompt como primer mensaje
+    contents = [system_prompt] + [
         {"role": msg["role"], "parts": [{"text": msg["text"]}]}
         for msg in history_messages
     ]
