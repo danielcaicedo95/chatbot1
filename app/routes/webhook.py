@@ -29,14 +29,11 @@ async def receive_message(request: Request):
         changes = entry['changes'][0]
         value = changes['value']
         messages = value.get('messages')
-        contacts = value.get('contacts')
 
         if messages:
             msg = messages[0]
             text = msg.get('text', {}).get('body')
             from_number = msg.get('from')
-            # Extraer nombre de perfil del contacto si está disponible
-            user_name = contacts[0]['profile']['name'] if contacts and contacts[0].get('profile') else None
 
             if not text or not from_number:
                 print("Mensaje sin texto o número inválido.")
@@ -54,17 +51,13 @@ async def receive_message(request: Request):
             # 4) Guardamos la respuesta del asistente
             user_histories[from_number].append({"role": "model", "text": respuesta})
 
-            # 5) Enviamos la respuesta de texto
+            # 5) Enviamos la respuesta por WhatsApp
             send_whatsapp_message(from_number, respuesta)
-
-            # 6) Enviamos plantilla con botón CTA (URL)
-            send_template_cta(from_number, user_name)
 
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
     return {"status": "received"}
-
 
 def send_whatsapp_message(to: str, message: str):
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
@@ -80,30 +73,3 @@ def send_whatsapp_message(to: str, message: str):
     }
     resp = requests.post(url, headers=headers, json=data)
     print("Respuesta enviada:", resp.status_code, resp.text)
-
-
-def send_template_cta(to: str, user_name: str = ""):  # Envía plantilla de botón URL
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    template_data = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "template",
-        "template": {
-            "name": "visit_website",       # Nombre de la plantilla aprobada
-            "language": {"code": "es_CO"},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": user_name or ""}
-                    ]
-                }
-            ]
-        }
-    }
-    resp = requests.post(url, headers=headers, json=template_data)
-    print("Template CTA enviado:", resp.status_code, resp.text)
