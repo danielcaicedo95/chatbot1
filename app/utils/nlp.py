@@ -1,4 +1,4 @@
-from app.clients.gemini import ask_gemini
+from app.clients.gemini import ask_gemini_with_history  # Usa la función correcta
 
 def extract_keywords(text: str, keywords: list[str]) -> list[str]:
     """
@@ -39,5 +39,5 @@ async def detecta_pedido_de_productos(texto_usuario: str) -> bool:
         f"¿El siguiente mensaje indica que el usuario quiere ver todos los productos disponibles en una tienda? "
         f"Responde solo con 'sí' o 'no':\n\n{texto_usuario}"
     )
-    respuesta = await ask_gemini(prompt)
+    respuesta = await ask_gemini_with_history(prompt)  # Cambiado a la función correcta
     return "sí" in respuesta.lower()
