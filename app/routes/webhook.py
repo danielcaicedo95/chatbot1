@@ -1,12 +1,13 @@
+# app/routes/webhook.py
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 import requests
 from collections import defaultdict, deque
 
 from app.config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID
-from app.services.gemini import ask_gemini_with_history  # ✅ Import actualizado
+from app.services.gemini import ask_gemini_with_history  # Import actualizado
 
-# Historial por usuario (memoria temporal en RAM)
+# Memoria temporal en RAM: guarda hasta 15 textos por usuario
 user_histories = defaultdict(lambda: deque(maxlen=15))
 
 router = APIRouter()
@@ -35,24 +36,22 @@ async def receive_message(request: Request):
             from_number = message.get('from')
 
             if text and from_number:
-                # 🧠 Guardar mensaje del usuario en la memoria
-                user_histories[from_number].append({"role": "user", "text": text})
+                # 1) Guardar el texto entrante en la memoria
+                user_histories[from_number].append(text)
 
-                # Crear historial para enviar a Gemini
-                history = [
-                    {"parts": [{"text": m["text"]}]} for m in user_histories[from_number]
-                ]
+                # 2) Convertir la memoria en lista de textos
+                history_texts = list(user_histories[from_number])
 
-                # ✨ Preguntar a Gemini con el historial
-                respuesta = await ask_gemini_with_history(history)
+                # 3) Consultar a Gemini con todo el historial
+                respuesta = await ask_gemini_with_history(history_texts)
 
-                # Guardar respuesta de Gemini en la memoria
-                user_histories[from_number].append({"role": "assistant", "text": respuesta})
+                # 4) Guardar la respuesta en la memoria
+                user_histories[from_number].append(respuesta)
 
-                # ✅ Enviar respuesta al usuario
+                # 5) Enviar la respuesta por WhatsApp
                 send_whatsapp_message(from_number, respuesta)
             else:
-                print("Mensaje no contiene texto o número de origen válido.")
+                print("Mensaje sin texto o número inválido.")
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
@@ -68,10 +67,7 @@ def send_whatsapp_message(to: str, message: str):
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {
-            "body": message
-        }
+        "text": {"body": message}
     }
-
     response = requests.post(url, headers=headers, json=data)
     print("Respuesta enviada:", response.status_code, response.text)
