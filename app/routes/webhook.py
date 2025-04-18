@@ -1,4 +1,3 @@
-# app/routes/webhook.py
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 import requests
@@ -54,6 +53,9 @@ async def receive_message(request: Request):
             # 5) Enviamos la respuesta por WhatsApp
             send_whatsapp_message(from_number, respuesta)
 
+            # 6) Enviamos botón con link a la tienda
+            send_whatsapp_button_url(from_number)
+
     except Exception as e:
         print("Error procesando el mensaje:", e)
 
@@ -73,3 +75,32 @@ def send_whatsapp_message(to: str, message: str):
     }
     resp = requests.post(url, headers=headers, json=data)
     print("Respuesta enviada:", resp.status_code, resp.text)
+
+def send_whatsapp_button_url(to: str):
+    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": "¿Te gustaría ver nuestros productos?"
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "url",
+                        "url": "https://tu-tienda.com",  # Reemplaza con tu URL real
+                        "title": "Visitar tienda"
+                    }
+                ]
+            }
+        }
+    }
+    resp = requests.post(url, headers=headers, json=data)
+    print("Botón enviado:", resp.status_code, resp.text)
