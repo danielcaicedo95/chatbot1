@@ -61,20 +61,45 @@ async def receive_message(request: Request):
 
     return {"status": "received"}
 
-def send_whatsapp_message(to: str, message: str):
+def send_whatsapp_message(to: str, message: str, button=False):
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": message}
-    }
+
+    if button:
+        # Estructura para enviar un botón de acción
+        data = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": message},  # El mensaje que precede al botón
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "url",  # Este tipo es para el enlace
+                            "text": "Visitar Sitio Web",  # El texto del botón
+                            "url": "https://daniseo.site"  # El enlace al que debe ir el botón
+                        }
+                    ]
+                }
+            }
+        }
+    else:
+        # Solo se envía un mensaje de texto normal
+        data = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": message}
+        }
+
     resp = requests.post(url, headers=headers, json=data)
     print("Respuesta enviada:", resp.status_code, resp.text)
+
 
 def send_whatsapp_button_url(to: str):
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
