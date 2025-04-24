@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 
 from app.utils.memory import user_histories, user_orders
@@ -6,7 +6,17 @@ from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
 from app.services.products import get_all_products
-from app.services.orders import create_order
+from app.services.orders import create_order, update_order
+
+
+def find_similar_products(requested, catalog):
+    requested_lower = requested.lower()
+    exact = [p for p in catalog if requested_lower in p["name"].lower()]
+    if exact:
+        return exact
+
+    similar = [p for p in catalog if any(w in p["name"].lower() for w in requested_lower.split())]
+    return similar
 
 
 async def handle_user_message(body: dict):
@@ -23,7 +33,7 @@ async def handle_user_message(body: dict):
         if not text or not from_number:
             return
 
-        # 1. Guardar mensaje del usuario
+        # Guardar mensaje del usuario
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": text,
@@ -31,79 +41,70 @@ async def handle_user_message(body: dict):
         })
         await save_message_to_supabase(from_number, "user", text)
 
-        # 2. Primer contacto: mensaje de bienvenida
+        # Primer mensaje
         if len(user_histories[from_number]) == 1:
-            greeting = (
+            saludo = (
                 "¡Hola! 👋 Soy el asistente de *Licores El Roble*. "
-                "¿Te gustaría ver nuestros productos, resolver una duda o hacer un pedido? 🍷"
+                "¿Quieres ver nuestro catálogo, resolver alguna duda o hacer un pedido? 🍻"
             )
             user_histories[from_number].append({
                 "role": "model",
-                "text": greeting,
+                "text": saludo,
                 "time": datetime.utcnow().isoformat()
             })
-            await save_message_to_supabase(from_number, "model", greeting)
-            send_whatsapp_message(from_number, greeting)
+            await save_message_to_supabase(from_number, "model", saludo)
+            send_whatsapp_message(from_number, saludo)
             return
 
-        # 3. Obtener catálogo actual
+        # Obtener catálogo
         productos = await get_all_products()
-        contexto = "Catálogo actual:\n"
-        for p in productos:
-            size = p.get("size", "botella estándar")
-            contexto += f"- {p['name']} ({size}): ${p['price']}\n"
-
-        # 4. Armar prompt profesional para Gemini
-        user_message = (
-            f"{text}\n\n"
-            f"{contexto}\n"
-            "Instrucciones de venta:\n"
-            "1. Engancha con un mensaje amistoso.\n"
-            "2. Pregunta si quieren ver productos, resolver dudas o comprar.\n"
-            "3. Muestra productos populares o promos.\n"
-            "4. Añade urgencia o prueba social.\n"
-            "5. Llama a la acción suave: ¿reservamos uno?\n"
-            "6. Si aceptan, pide en orden: nombre, teléfono, dirección, pago.\n"
-            "7. Confirma pedido y ofrece seguimiento.\n\n"
-            "*** IMPORTANTE: Cuando llegues al paso 7 y confirmes el pedido: ***\n"
-            "DEBES incluir al FINAL de TODA tu respuesta un bloque JSON con los detalles del pedido recopilado. "
-            "Estructura:\n"
-            "```json\n"
-            '{"order_details": {"name": "NOMBRE_CLIENTE", "address": "DIRECCION_ENTREGA", "phone": "TELEFONO_CONTACTO", '
-            '"products": [{"name": "NOMBRE_PRODUCTO", "quantity": CANTIDAD, "price": PRECIO_UNITARIO}], "total": TOTAL_NUMERO}}\n'
-            "```\n"
-            "Si falta algún dato, usa \"\" o null. El total debe ser un número sin símbolo $.\n"
-            "Responde como humano, sin tecnicismos ni IDs. Usa emojis y tono cálido."
+        contexto = "Catálogo actual:\n" + "\n".join(
+            f"- {p['name']} ({p.get('size', 'botella estándar')}): ${p['price']}" for p in productos
         )
 
-        user_histories[from_number][-1] = {
-            "role": "user",
-            "text": user_message,
-            "time": datetime.utcnow().isoformat()
-        }
+        # Construir prompt con instrucciones y catálogo
+        instrucciones = (
+            f"{text}\n\n"
+            f"{contexto}\n"
+            "INSTRUCCIONES para el asistente:\n"
+            "1. Si algún producto no está disponible, sugiere una alternativa similar (nombre o categoría).\n"
+            "2. Al detectar intención de compra, responde con:\n"
+            "- Lista de productos con cantidades y precios\n"
+            "- Precio total + $5000 de envío\n"
+            "- Pregunta si desea agregar algo más\n"
+            "- Recomienda *1 solo producto adicional* para acompañar el pedido (para el guayabo, snacks, etc.)\n"
+            "- Si el cliente dice que no desea nada más, ahí sí pide datos (nombre, dirección, pago).\n"
+            "3. Siempre incluye emojis y tono humano.\n"
+            "4. Al confirmar el pedido, incluye este JSON al final:\n"
+            "```json\n"
+            '{"order_details": {"name": "NOMBRE", "address": "DIRECCIÓN", "phone": "TELÉFONO", '
+            '"products": [{"name": "NOMBRE", "quantity": CANTIDAD, "price": PRECIO}], "total": TOTAL}}\n'
+            "```\n"
+            "Si el usuario modifica algo dentro de los siguientes 5 minutos, reemplaza el pedido anterior.\n"
+            "Responde como un amigo, sin tecnicismos. 😄"
+        )
 
-        # 5. Obtener respuesta de Gemini
-        history = user_histories[from_number]
-        respuesta_completa = await ask_gemini_with_history(history)
+        user_histories[from_number][-1]["text"] = instrucciones
+        respuesta = await ask_gemini_with_history(user_histories[from_number])
 
-        # 5b. Intentar extraer el bloque JSON
+        # Intentar extraer bloque JSON
         order_data = None
-        respuesta_limpia = respuesta_completa
+        respuesta_limpia = respuesta
         try:
-            json_start = respuesta_completa.rfind('{"order_details":')
+            json_start = respuesta.rfind('{"order_details":')
             if json_start != -1:
-                json_end = respuesta_completa.rfind('}') + 1
-                json_text = respuesta_completa[json_start:json_end]
+                json_end = respuesta.rfind('}') + 1
+                json_text = respuesta[json_start:json_end]
                 parsed = json.loads(json_text)
                 order_data = parsed.get("order_details")
-                respuesta_limpia = respuesta_completa[:json_start].strip()
-                print(f"✅ Pedido extraído: {order_data}")
+                respuesta_limpia = respuesta[:json_start].strip()
+                print(f"✅ Pedido detectado: {order_data}")
             else:
-                print("ℹ️ No se encontró bloque JSON.")
+                print("ℹ️ No se encontró JSON.")
         except Exception as e:
-            print(f"⚠️ Error al parsear JSON: {e}")
+            print(f"⚠️ Error extrayendo JSON: {e}")
 
-        # 6. Guardar y enviar solo el mensaje limpio
+        # Guardar y enviar respuesta limpia
         user_histories[from_number].append({
             "role": "model",
             "text": respuesta_limpia,
@@ -112,19 +113,28 @@ async def handle_user_message(body: dict):
         await save_message_to_supabase(from_number, "model", respuesta_limpia)
         send_whatsapp_message(from_number, respuesta_limpia)
 
-        # 7. Crear el pedido si hay datos válidos
+        # Crear o actualizar pedido en Supabase
         if order_data and order_data.get("products"):
-            try:
-                await create_order(
-                    phone=order_data.get("phone", from_number),
+            now = datetime.utcnow()
+            previous = user_orders.get(from_number)
+
+            order_data["phone"] = order_data.get("phone", from_number)
+            if previous and (now - previous["timestamp"]) <= timedelta(minutes=5):
+                await update_order(previous["id"], order_data)
+                print(f"♻️ Pedido actualizado para {from_number}")
+            else:
+                new_order = await create_order(
+                    phone=order_data["phone"],
                     name=order_data.get("name", ""),
                     address=order_data.get("address", ""),
                     products=order_data.get("products", []),
                     total=float(order_data.get("total", 0.0))
                 )
-                print(f"🛒 Pedido creado exitosamente para {from_number}")
-            except Exception as e:
-                print(f"❌ Error creando pedido: {e}")
+                user_orders[from_number] = {
+                    "id": new_order["id"],
+                    "timestamp": now
+                }
+                print(f"🛒 Pedido creado para {from_number}")
 
     except Exception as e:
-        print(f"❌ Error procesando el mensaje: {e}")
+        print(f"❌ Error procesando mensaje: {e}")
