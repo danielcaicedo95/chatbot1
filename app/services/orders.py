@@ -2,13 +2,11 @@ from datetime import datetime, timedelta, timezone
 from app.services.supabase import save_order_to_supabase, get_recent_order_by_phone, update_order_in_supabase
 
 
-async def create_order(phone: str, name: str, address: str, products: list, total: float):
+async def create_order(phone: str, name: str, address: str, products: list, total: float, payment_method: str):
     try:
-        # Obtener el tiempo actual en UTC
         now = datetime.now(timezone.utc)
         five_minutes_ago = now - timedelta(minutes=5)
 
-        # Verificar si ya hay un pedido reciente del mismo número
         existing_order = await get_recent_order_by_phone(phone, five_minutes_ago)
 
         order_data = {
@@ -17,6 +15,7 @@ async def create_order(phone: str, name: str, address: str, products: list, tota
             "address": address,
             "products": products,
             "total": total,
+            "payment_method": payment_method,
             "updated_at": now.isoformat()
         }
 
@@ -32,5 +31,6 @@ async def create_order(phone: str, name: str, address: str, products: list, tota
         print("❌ Error al guardar pedido:", e)
         return None
 
-# Alias para mantener compatibilidad con conversation.py
+
+# Alias para mantener compatibilidad si se usa `update_order` desde conversation.py
 update_order = create_order
