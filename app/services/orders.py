@@ -31,3 +31,6 @@ async def create_order(phone: str, name: str, address: str, products: list, tota
     except Exception as e:
         print("❌ Error al guardar pedido:", e)
         return None
+
+# Alias para mantener compatibilidad con conversation.py
+update_order = create_order
