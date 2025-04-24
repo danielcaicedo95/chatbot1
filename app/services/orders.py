@@ -1,6 +1,7 @@
 # app/services/orders.py
 
-from app.services.supabase import supabase
+from app.services.supabase import save_order_to_supabase
+
 
 async def create_order(phone: str, name: str, address: str, products: list, total: float):
     try:
@@ -11,8 +12,7 @@ async def create_order(phone: str, name: str, address: str, products: list, tota
             "products": products,
             "total": total
         }
-        response = supabase.table("orders").insert(order_data).execute()
-        print("📝 Pedido guardado en Supabase:", response)
+        response = await save_order_to_supabase(order_data)
         return response
     except Exception as e:
         print("❌ Error al guardar pedido:", e)
