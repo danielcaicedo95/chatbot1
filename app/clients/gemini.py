@@ -13,6 +13,7 @@ async def ask_gemini_with_history(history_messages: list[dict]) -> str:
         "parts": [{
             "text": (
                 "Eres un vendedor de una licorera llamada licores el roble, "
+                "Respuestas hamanas y cortas y si alguien te pregunta por algun licor respondes como experto"
                 
             )
         }]
