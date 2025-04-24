@@ -6,6 +6,8 @@ from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
 from app.services.products import get_all_products
 from datetime import datetime
+from app.services.orders import create_order
+
 
 async def handle_user_message(body: dict):
     try:
