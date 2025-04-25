@@ -8,35 +8,37 @@ from app.services.supabase import save_message_to_supabase
 from app.services.products import get_all_products
 from app.services.orders import create_order, update_order
 
-
+# Campos obligatorios para confirmar pedido
 REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
-
 
 def find_similar_products(requested, catalog):
     requested_lower = requested.lower()
     exact = [p for p in catalog if requested_lower in p["name"].lower()]
     if exact:
         return exact
-    similar = [p for p in catalog if any(w in p["name"].lower() for w in requested_lower.split())]
-    return similar
-
+    return [p for p in catalog if any(w in p["name"].lower() for w in requested_lower.split())]
 
 def extract_order_data(text: str):
+    """Extrae el bloque JSON de pedido y devuelve (order_data_dict, texto_sin_json)."""
     try:
-        json_start = text.rfind('{"order_details":')
-        if json_start != -1:
-            json_end = text.rfind('}') + 1
-            json_text = text[json_start:json_end]
-            parsed = json.loads(json_text)
-            return parsed.get("order_details"), text[:json_start].strip()
+        idx = text.rfind('{"order_details":')
+        if idx != -1:
+            end = text.rfind('}') + 1
+            js = text[idx:end]
+            parsed = json.loads(js)
+            return parsed.get("order_details"), text[:idx].strip()
     except Exception as e:
-        print(f"⚠️ Error extrayendo JSON: {e}")
+        print("⚠️ Error extrayendo JSON:", e)
     return None, text
 
-
-def get_missing_fields(order_data):
-    return [field for field in REQUIRED_FIELDS if not order_data.get(field)]
-
+def get_missing_fields(data: dict):
+    """Devuelve la lista de campos REQUIRED_FIELDS que estén vacíos o nulos."""
+    missing = []
+    for f in REQUIRED_FIELDS:
+        val = data.get(f)
+        if not val or (isinstance(val, str) and val.strip().lower().startswith("tu ")):
+            missing.append(f)
+    return missing
 
 async def handle_user_message(body: dict):
     try:
@@ -52,91 +54,99 @@ async def handle_user_message(body: dict):
         if not text or not from_number:
             return
 
-        # Guardar mensaje del usuario
+        # 1) Guardar mensaje en historial y Supabase
         user_histories.setdefault(from_number, []).append({
-            "role": "user",
-            "text": text,
+            "role": "user", "text": text,
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "user", text)
 
-        # Primer mensaje
+        # 2) Primer saludo
         if len(user_histories[from_number]) == 1:
             saludo = (
                 "¡Hola! 👋 Soy el asistente de *Licores El Roble*. "
                 "¿Quieres ver nuestro catálogo, resolver alguna duda o hacer un pedido? 🍻"
             )
             user_histories[from_number].append({
-                "role": "model",
-                "text": saludo,
+                "role": "model", "text": saludo,
                 "time": datetime.utcnow().isoformat()
             })
             await save_message_to_supabase(from_number, "model", saludo)
             send_whatsapp_message(from_number, saludo)
             return
 
+        # 3) Obtener catálogo y armar prompt
         productos = await get_all_products()
         contexto = "Catálogo actual:\n" + "\n".join(
-            f"- {p['name']} ({p.get('size', 'botella estándar')}): ${p['price']}" for p in productos
+            f"- {p['name']} ({p.get('size','botella estándar')}): ${p['price']}"
+            for p in productos
         )
 
         instrucciones = (
             f"{text}\n\n"
             f"{contexto}\n"
             "INSTRUCCIONES para el asistente:\n"
-            "1. Si algún producto no está disponible, sugiere una alternativa similar (nombre o categoría).\n"
+            "1. Si algún producto no está disponible, sugiere una alternativa similar.\n"
             "2. Al detectar intención de compra, responde con:\n"
-            "- Lista de productos con cantidades y precios\n"
-            "- Precio total + $5000 de envío\n"
-            "- Pregunta si desea agregar algo más\n"
-            "- Recomienda *1 solo producto adicional* para acompañar el pedido (para el guayabo, snacks, etc.)\n"
-            "- Si el cliente dice que no desea nada más, ahí sí pide datos (nombre, dirección, pago).\n"
-            "3. Siempre incluye emojis y tono humano.\n"
-            "4. Al confirmar el pedido, incluye este JSON al final:\n"
+            "   - Lista de productos con cantidades y precios\n"
+            "   - Subtotal + $5000 de envío\n"
+            "   - ¿Deseas algo más?\n"
+            "   - Recomienda 1 producto adicional para acompañar (guayabo, snacks, etc.)\n"
+            "   - Si dice “no”, pide datos (nombre, dirección, teléfono, pago).\n"
+            "3. Incluye emojis y tono humano.\n"
+            "4. Al confirmar, añade al final este JSON:\n"
             "```json\n"
-            '{"order_details": {"name": "NOMBRE", "address": "DIRECCIÓN", "phone": "TELÉFONO", "payment_method": "TIPO_PAGO", '
-            '"products": [{"name": "NOMBRE", "quantity": CANTIDAD, "price": PRECIO}], "total": TOTAL}}\n'
+            '{"order_details":{"name":"NOMBRE","address":"DIRECCIÓN","phone":"TELÉFONO",'
+            '"payment_method":"TIPO_PAGO","products":[{"name":"NOMBRE","quantity":1,"price":0}],'
+            '"total":0}}\n'
             "```\n"
-            "Si el usuario modifica algo dentro de los siguientes 5 minutos, reemplaza el pedido anterior.\n"
-            "Responde como un amigo, sin tecnicismos. 😄"
+            "Si modifica dentro de 5 min, actualiza el pedido.\n"
+            "Responde como un amigo. 😄"
         )
 
+        # Reemplazamos el último mensaje
         user_histories[from_number][-1]["text"] = instrucciones
-        respuesta = await ask_gemini_with_history(user_histories[from_number])
+        gemini_resp = await ask_gemini_with_history(user_histories[from_number])
 
-        order_data, respuesta_limpia = extract_order_data(respuesta)
+        # 4) Extraer JSON y limpiar texto
+        order_data, clean_text = extract_order_data(gemini_resp)
 
-        # Guardar y enviar respuesta sin JSON
+        # Guardar respuesta limpia
         user_histories[from_number].append({
-            "role": "model",
-            "text": respuesta_limpia,
+            "role": "model", "text": clean_text,
             "time": datetime.utcnow().isoformat()
         })
-        await save_message_to_supabase(from_number, "model", respuesta_limpia)
-        send_whatsapp_message(from_number, respuesta_limpia)
+        await save_message_to_supabase(from_number, "model", clean_text)
+        send_whatsapp_message(from_number, clean_text)
 
-        # Manejo de datos incompletos
+        # 5) Si hubo JSON de pedido, lo procesamos
         if order_data:
+            # Fusionar en datos pendientes
             pending = user_pending_data.get(from_number, {})
             pending.update(order_data)
             user_pending_data[from_number] = pending
 
-            missing = get_missing_fields(pending)
-            if missing:
-                msg_faltantes = "Para confirmar tu pedido necesito que me digas:\n" + \
-                                "\n".join(f"- Tu {f.replace('_', ' ')}" for f in missing)
-                send_whatsapp_message(from_number, f"📋 {msg_faltantes}")
+            # Marcar placeholders como vacíos
+            for f in REQUIRED_FIELDS:
+                v = pending.get(f, "")
+                if isinstance(v, str) and v.strip().lower().startswith("tu "):
+                    pending[f] = None
+
+            # Comprobar campos faltantes
+            faltantes = get_missing_fields(pending)
+            if faltantes:
+                texto = "Para completar tu pedido necesito:\n" + "\n".join(
+                    f"- {f.replace('_',' ')}" for f in faltantes
+                )
+                send_whatsapp_message(from_number, f"📋 {texto}")
                 return
 
-            # Completo → guardar pedido
+            # 6) Todos los datos están; creamos o actualizamos
             now = datetime.utcnow()
-            previous = user_orders.get(from_number)
-
-            if previous and (now - previous["timestamp"]) <= timedelta(minutes=5):
-                await update_order(previous["id"], pending)
-                print(f"♻️ Pedido actualizado para {from_number}")
-            else:
-                new_order = await create_order(
+            prev = user_orders.get(from_number)
+            # Llamamos siempre con todos los parámetros nombrados
+            if prev and (now - prev["timestamp"]) <= timedelta(minutes=5):
+                await update_order(
                     phone=pending["phone"],
                     name=pending["name"],
                     address=pending["address"],
@@ -144,9 +154,21 @@ async def handle_user_message(body: dict):
                     total=float(pending["total"]),
                     payment_method=pending["payment_method"]
                 )
-                user_orders[from_number] = {"id": new_order["id"], "timestamp": now}
-                print(f"🛒 Pedido creado para {from_number}")
-                send_whatsapp_message(from_number, "✅ ¡Listo! Tu pedido fue confirmado. Gracias por tu compra 🥳")
+                send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
+            else:
+                new = await create_order(
+                    phone=pending["phone"],
+                    name=pending["name"],
+                    address=pending["address"],
+                    products=pending["products"],
+                    total=float(pending["total"]),
+                    payment_method=pending["payment_method"]
+                )
+                if new and new.get("id"):
+                    user_orders[from_number] = {"id": new["id"], "timestamp": now}
+                    send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
+                else:
+                    send_whatsapp_message(from_number, "❌ Lo siento, no pude guardar tu pedido. Intenta de nuevo.")
 
     except Exception as e:
-        print(f"❌ Error procesando mensaje: {e}")
+        print("❌ Error procesando mensaje:", e)
