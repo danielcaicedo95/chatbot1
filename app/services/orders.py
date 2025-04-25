@@ -1,36 +1,48 @@
+# app/services/orders.py
 from datetime import datetime, timedelta, timezone
-from app.services.supabase import save_order_to_supabase, get_recent_order_by_phone, update_order_in_supabase
+from app.services.supabase import (
+    save_order_to_supabase,
+    get_recent_order_by_phone_number,
+    update_order_in_supabase
+)
 
-
-async def create_order(phone: str, name: str, address: str, products: list, total: float, payment_method: str):
+async def create_order(
+    phone: str,
+    name: str,
+    address: str,
+    products: list,
+    total: float,
+    payment_method: str
+):
+    """
+    Crea o actualiza un pedido en Supabase.
+    Si existe un pedido en los últimos 5 minutos para este `phone`, lo actualiza.
+    """
     try:
         now = datetime.now(timezone.utc)
         five_minutes_ago = now - timedelta(minutes=5)
+        
+        existing = await get_recent_order_by_phone_number(phone, five_minutes_ago)
 
-        existing_order = await get_recent_order_by_phone(phone, five_minutes_ago)
-
-        order_data = {
-            "phone": phone,
+        payload = {
+            "phone_number": phone,
             "name": name,
             "address": address,
-            "products": products,
-            "total": total,
             "payment_method": payment_method,
-            "updated_at": now.isoformat()
+            "products": products,
+            "total": total
         }
 
-        if existing_order:
+        if existing:
             print("🔄 Pedido reciente encontrado. Actualizando...")
-            order_id = existing_order.get("id")
-            return await update_order_in_supabase(order_id, order_data)
+            return await update_order_in_supabase(existing["id"], payload)
         else:
             print("🆕 Pedido nuevo. Guardando...")
-            order_data["created_at"] = now.isoformat()
-            return await save_order_to_supabase(order_data)
+            return await save_order_to_supabase(payload)
+
     except Exception as e:
         print("❌ Error al guardar pedido:", e)
         return None
 
-
-# Alias para mantener compatibilidad si se usa `update_order` desde conversation.py
+# Alias para mantener compatibilidad con conversation.py
 update_order = create_order
