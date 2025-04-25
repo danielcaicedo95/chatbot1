@@ -11,13 +11,17 @@ headers = {
     "Prefer": "return=representation"
 }
 
+def utc_iso_z():
+    # Devuelve timestamp en formato ISO 8601 UTC con 'Z' (Zulu)
+    return datetime.utcnow().isoformat() + "Z"
+
 async def save_message_to_supabase(phone_number: str, role: str, text: str):
     url = f"{SUPABASE_URL}/rest/v1/messages"
     payload = {
         "phone_number": phone_number,
         "role": role,
         "text": text,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": utc_iso_z()
     }
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, json=payload, headers=headers)
@@ -40,8 +44,10 @@ async def get_recent_order_by_phone_number(phone_number: str, since_time: dateti
     Busca un pedido por número de teléfono creado desde `since_time` hasta ahora.
     Retorna el primer pedido encontrado o None.
     """
+    # Convertimos since_time a ISO con 'Z'
+    since = since_time.isoformat().replace("+00:00", "Z")
     url = f"{SUPABASE_URL}/rest/v1/orders"
-    query = f"?phone_number=eq.{phone_number}&created_at=gte.{since_time.isoformat()}&select=*"
+    query = f"?phone_number=eq.{phone_number}&created_at=gte.{since}&select=*"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url + query, headers=headers)
         data = resp.json()
