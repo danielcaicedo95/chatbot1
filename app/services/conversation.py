@@ -5,7 +5,7 @@ from app.utils.memory import user_histories, user_orders, user_pending_data
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
-from app.services.products import get_all_products, update_product_stock
+from app.services.products import get_all_products, update_product_stock, get_recommended_products
 from app.services.orders import create_order, update_order
 
 # Campos obligatorios para confirmar pedido
@@ -117,6 +117,21 @@ async def handle_user_message(body: dict):
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "model", clean_text)
+        # 🔍 Buscar recomendaciones desde la base de datos según lo que pidió el usuario
+        if order_data and order_data.get("products"):
+            recomendaciones = await get_recommended_products(order_data["products"])
+            if recomendaciones:
+                texto_rec = "\n".join(
+                    f"- {r['name']} ({r.get('size', 'estándar')}): ${r['price']}" for r in recomendaciones
+                )
+                texto_rec = (
+                    "\n🧠 Basado en tu pedido, podrías acompañarlo con:\n" +
+                    texto_rec +
+                    "\n¿Te gustaría agregar alguno de estos?"
+                )
+                # Añadir la recomendación antes de responder
+                clean_text += texto_rec
+
         send_whatsapp_message(from_number, clean_text)
 
         # 5) Si hubo JSON de pedido, lo procesamos
