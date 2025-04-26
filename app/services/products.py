@@ -43,30 +43,42 @@ async def search_products_by_keyword(keyword: str):
         return data
 
 async def update_product_stock(product_name: str, quantity_sold: int):
-    # Obtener producto por nombre
-    url = f"{SUPABASE_URL}/rest/v1/products?name=eq.{product_name}&select=*"
+    """
+    Busca un producto por nombre (ilike, case-insensitive) y descuenta la cantidad vendida.
+    Si hay varios, usa el primero que encuentre.
+    """
+    # 1) Buscar producto por subcadena (ilike)
+    search_url = (
+        f"{SUPABASE_URL}/rest/v1/products"
+        f"?name=ilike.*{product_name.replace(' ','%20')}*&select=*"
+    )
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code != 200 or not resp.json():
+        resp = await client.get(search_url, headers=headers)
+        if resp.status_code != 200:
+            print(f"❌ Error buscando '{product_name}':", resp.text)
+            return
+        items = resp.json()
+        if not items:
             print(f"❌ Producto '{product_name}' no encontrado en inventario.")
             return
 
-        product = resp.json()[0]
+        # 2) Tomar el primer match
+        product = items[0]
         product_id = product["id"]
         current_stock = product.get("stock", 0)
 
-        # Restar la cantidad vendida
+        # 3) Calcular nuevo stock
         new_stock = max(0, current_stock - quantity_sold)
 
-        # Actualizar el stock en Supabase
+        # 4) Actualizar en Supabase
         patch_url = f"{SUPABASE_URL}/rest/v1/products?id=eq.{product_id}"
         patch_data = {"stock": new_stock}
-
         patch_resp = await client.patch(patch_url, headers=headers, json=patch_data)
-        if patch_resp.status_code == 204:
-            print(f"✅ Stock actualizado para {product_name}: {current_stock} → {new_stock}")
+        if patch_resp.status_code in (200, 204):
+            print(f"✅ Stock actualizado para '{product['name']}': {current_stock} → {new_stock}")
         else:
-            print(f"❌ Error actualizando stock para {product_name}: {patch_resp.text}")
+            print(f"❌ Error actualizando stock para '{product['name']}':", patch_resp.text)
+
 
 async def get_recommended_products(pedido: list):
     """Devuelve productos de la BD recomendables según los productos del pedido."""
