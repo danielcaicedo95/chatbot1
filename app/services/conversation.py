@@ -5,7 +5,7 @@ from app.utils.memory import user_histories, user_orders, user_pending_data
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
-from app.services.products import get_all_products
+from app.services.products import get_all_products, update_product_stock
 from app.services.orders import create_order, update_order
 
 # Campos obligatorios para confirmar pedido
@@ -167,6 +167,9 @@ async def handle_user_message(body: dict):
                 if new and new.get("id"):
                     user_orders[from_number] = {"id": new["id"], "timestamp": now}
                     send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
+                    # 🔄 Restar inventario por cada producto comprado
+                    for prod in pending["products"]:
+                        await update_product_stock(prod["name"], prod["quantity"])
                 else:
                     send_whatsapp_message(from_number, "❌ Lo siento, no pude guardar tu pedido. Intenta de nuevo.")
 
