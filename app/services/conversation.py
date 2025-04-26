@@ -161,7 +161,7 @@ async def handle_user_message(body: dict):
             prev = user_orders.get(from_number)
             # Llamamos siempre con todos los parámetros nombrados
             if prev and (now - prev["timestamp"]) <= timedelta(minutes=5):
-                await update_order(
+                updated = await update_order(
                     phone=pending["phone"],
                     name=pending["name"],
                     address=pending["address"],
@@ -169,7 +169,15 @@ async def handle_user_message(body: dict):
                     total=float(pending["total"]),
                     payment_method=pending["payment_method"]
                 )
-                send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
+                if updated and updated.get("id"):
+                    # 🔄 También restamos stock cuando el pedido se actualiza
+                    for prod in pending["products"]:
+                        await update_product_stock(prod["name"], prod["quantity"])
+                    send_whatsapp_message(from_number, "♻️ Pedido actualizado y stock descontado correctamente.")
+                    # Limpiar datos pendientes
+                    user_pending_data.pop(from_number, None)
+                else:
+                    send_whatsapp_message(from_number, "❌ No pude actualizar tu pedido. Intenta de nuevo.")
             else:
                 new = await create_order(
                     phone=pending["phone"],
@@ -181,12 +189,15 @@ async def handle_user_message(body: dict):
                 )
                 if new and new.get("id"):
                     user_orders[from_number] = {"id": new["id"], "timestamp": now}
-                    send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
                     # 🔄 Restar inventario por cada producto comprado
                     for prod in pending["products"]:
                         await update_product_stock(prod["name"], prod["quantity"])
+                    send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
+                    # Limpiar datos pendientes
+                    user_pending_data.pop(from_number, None)
                 else:
                     send_whatsapp_message(from_number, "❌ Lo siento, no pude guardar tu pedido. Intenta de nuevo.")
+
 
     except Exception as e:
         print("❌ Error procesando mensaje:", e)
