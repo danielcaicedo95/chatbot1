@@ -10,6 +10,8 @@ from app.services.orders import create_order, update_order
 
 # Campos obligatorios para confirmar pedido
 REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
+# Valores de placeholder que deben considerarse faltantes
+PLACEHOLDER_VALUES = {"NOMBRE", "DIRECCIÓN", "TELÉFONO", "TIPO_PAGO"}
 
 def find_similar_products(requested, catalog):
     requested_lower = requested.lower()
@@ -32,11 +34,17 @@ def extract_order_data(text: str):
     return None, text
 
 def get_missing_fields(data: dict):
-    """Devuelve la lista de campos REQUIRED_FIELDS que estén vacíos o nulos."""
+    """Devuelve la lista de campos REQUIRED_FIELDS que estén vacíos, nulos
+       o igual a uno de los placeholders."""
     missing = []
     for f in REQUIRED_FIELDS:
         val = data.get(f)
-        if not val or (isinstance(val, str) and val.strip().lower().startswith("tu ")):
+        if (not val
+            or (isinstance(val, str) and (
+                    val.upper() in PLACEHOLDER_VALUES
+                    or val.strip().lower().startswith("tu ")
+               ))
+           ):
             missing.append(f)
     return missing
 
@@ -53,6 +61,62 @@ async def handle_user_message(body: dict):
         from_number = msg.get('from')
         if not text or not from_number:
             return
+
+        # 0) Manejo de datos pendientes de pedido
+        pending = user_pending_data.get(from_number)
+        if pending:
+            faltantes = get_missing_fields(pending)
+            if faltantes:
+                # Asignar valor al primer campo faltante
+                campo = faltantes[0]
+                pending[campo] = text
+                user_pending_data[from_number] = pending
+
+                # Verificar si quedan más campos por pedir
+                faltantes = get_missing_fields(pending)
+                if faltantes:
+                    etiqueta = faltantes[0].replace("_", " ")
+                    send_whatsapp_message(from_number, f"📋 Por favor indícame tu *{etiqueta}*:")
+                    return
+
+                # Ya tenemos todos los datos, creamos o actualizamos pedido
+                now = datetime.utcnow()
+                prev = user_orders.get(from_number)
+                if prev and (now - prev["timestamp"]) <= timedelta(minutes=5):
+                    updated = await update_order(
+                        phone=pending["phone"],
+                        name=pending["name"],
+                        address=pending["address"],
+                        products=pending["products"],
+                        total=float(pending["total"]),
+                        payment_method=pending["payment_method"]
+                    )
+                    if updated and updated.get("id"):
+                        for prod in pending["products"]:
+                            await update_product_stock(prod["name"], prod["quantity"])
+                        send_whatsapp_message(from_number, "♻️ Pedido actualizado y stock descontado correctamente.")
+                    else:
+                        send_whatsapp_message(from_number, "❌ No pude actualizar tu pedido. Intenta de nuevo.")
+                else:
+                    new = await create_order(
+                        phone=pending["phone"],
+                        name=pending["name"],
+                        address=pending["address"],
+                        products=pending["products"],
+                        total=float(pending["total"]),
+                        payment_method=pending["payment_method"]
+                    )
+                    if new and new.get("id"):
+                        user_orders[from_number] = {"id": new["id"], "timestamp": now}
+                        for prod in pending["products"]:
+                            await update_product_stock(prod["name"], prod["quantity"])
+                        send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
+                    else:
+                        send_whatsapp_message(from_number, "❌ Lo siento, no pude guardar tu pedido. Intenta de nuevo.")
+
+                # Limpiar estado pendiente
+                user_pending_data.pop(from_number, None)
+                return
 
         # 1) Guardar mensaje en historial y Supabase
         user_histories.setdefault(from_number, []).append({
@@ -78,8 +142,7 @@ async def handle_user_message(body: dict):
         # 3) Obtener catálogo y armar prompt
         productos = await get_all_products()
         contexto = "Catálogo actual:\n" + "\n".join(
-            f"- {p['name']} ({p.get('size','botella estándar')}): ${p['price']}"
-            for p in productos
+            f"- {p['name']} ({p.get('size','botella estándar')}): ${p['price']}" for p in productos
         )
 
         instrucciones = (
@@ -92,19 +155,17 @@ async def handle_user_message(body: dict):
             "   - Subtotal + $5000 de envío\n"
             "   - ¿Deseas algo más?\n"
             "   - Recomienda 1 producto adicional para acompañar (guayabo, snacks, etc.)\n"
-            "   - Si dice “no”, pide datos (nombre, dirección, teléfono, pago).\n"
+            "   - Si dice “no”, pide datos (name, address, phone, payment_method).\n"
             "3. Incluye emojis y tono humano.\n"
             "4. Al confirmar, añade al final este JSON:\n"
-            "```json\n"
             '{"order_details":{"name":"NOMBRE","address":"DIRECCIÓN","phone":"TELÉFONO",'
             '"payment_method":"TIPO_PAGO","products":[{"name":"NOMBRE","quantity":1,"price":0}],'
             '"total":0}}\n'
-            "```\n"
             "Si modifica dentro de 5 min, actualiza el pedido.\n"
             "Responde como un amigo. 😄"
         )
 
-        # Reemplazamos el último mensaje
+        # Reemplazamos el último mensaje en el historial con las instrucciones
         user_histories[from_number][-1]["text"] = instrucciones
         gemini_resp = await ask_gemini_with_history(user_histories[from_number])
 
@@ -117,37 +178,32 @@ async def handle_user_message(body: dict):
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "model", clean_text)
-        # 🔍 Buscar recomendaciones desde la base de datos según lo que pidió el usuario
+
+        # 🔍 Recomendaciones basadas en el pedido parcial
         if order_data and order_data.get("products"):
             recomendaciones = await get_recommended_products(order_data["products"])
             if recomendaciones:
                 texto_rec = "\n".join(
                     f"- {r['name']} ({r.get('size', 'estándar')}): ${r['price']}" for r in recomendaciones
                 )
-                texto_rec = (
-                    "\n🧠 Basado en tu pedido, podrías acompañarlo con:\n" +
-                    texto_rec +
-                    "\n¿Te gustaría agregar alguno de estos?"
-                )
-                # Añadir la recomendación antes de responder
+                texto_rec = ("\n🧠 Basado en tu pedido, podrías acompañarlo con:\n" + texto_rec +
+                             "\n¿Te gustaría agregar alguno de estos?")
                 clean_text += texto_rec
 
         send_whatsapp_message(from_number, clean_text)
 
-        # 5) Si hubo JSON de pedido, lo procesamos
+        # 5) Procesar pedido parcial para pedir datos
         if order_data:
-            # Fusionar en datos pendientes
             pending = user_pending_data.get(from_number, {})
             pending.update(order_data)
             user_pending_data[from_number] = pending
 
-            # Marcar placeholders como vacíos
+            # Normalizar placeholders
             for f in REQUIRED_FIELDS:
                 v = pending.get(f, "")
-                if isinstance(v, str) and v.strip().lower().startswith("tu "):
+                if isinstance(v, str) and v.strip().upper() in PLACEHOLDER_VALUES:
                     pending[f] = None
 
-            # Comprobar campos faltantes
             faltantes = get_missing_fields(pending)
             if faltantes:
                 texto = "Para completar tu pedido necesito:\n" + "\n".join(
@@ -155,49 +211,6 @@ async def handle_user_message(body: dict):
                 )
                 send_whatsapp_message(from_number, f"📋 {texto}")
                 return
-
-            # 6) Todos los datos están; creamos o actualizamos
-            now = datetime.utcnow()
-            prev = user_orders.get(from_number)
-            # Llamamos siempre con todos los parámetros nombrados
-            if prev and (now - prev["timestamp"]) <= timedelta(minutes=5):
-                updated = await update_order(
-                    phone=pending["phone"],
-                    name=pending["name"],
-                    address=pending["address"],
-                    products=pending["products"],
-                    total=float(pending["total"]),
-                    payment_method=pending["payment_method"]
-                )
-                if updated and updated.get("id"):
-                    # 🔄 También restamos stock cuando el pedido se actualiza
-                    for prod in pending["products"]:
-                        await update_product_stock(prod["name"], prod["quantity"])
-                    send_whatsapp_message(from_number, "♻️ Pedido actualizado y stock descontado correctamente.")
-                    # Limpiar datos pendientes
-                    user_pending_data.pop(from_number, None)
-                else:
-                    send_whatsapp_message(from_number, "❌ No pude actualizar tu pedido. Intenta de nuevo.")
-            else:
-                new = await create_order(
-                    phone=pending["phone"],
-                    name=pending["name"],
-                    address=pending["address"],
-                    products=pending["products"],
-                    total=float(pending["total"]),
-                    payment_method=pending["payment_method"]
-                )
-                if new and new.get("id"):
-                    user_orders[from_number] = {"id": new["id"], "timestamp": now}
-                    # 🔄 Restar inventario por cada producto comprado
-                    for prod in pending["products"]:
-                        await update_product_stock(prod["name"], prod["quantity"])
-                    send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
-                    # Limpiar datos pendientes
-                    user_pending_data.pop(from_number, None)
-                else:
-                    send_whatsapp_message(from_number, "❌ Lo siento, no pude guardar tu pedido. Intenta de nuevo.")
-
 
     except Exception as e:
         print("❌ Error procesando mensaje:", e)
