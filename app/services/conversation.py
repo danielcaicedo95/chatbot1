@@ -8,8 +8,7 @@ from app.services.supabase import save_message_to_supabase
 from app.services.products import get_all_products, update_product_stock, get_recommended_products
 from app.services.orders import create_order, update_order
 
-# Campos obligatorios para confirmar pedido
-REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
+# Campos obligatorios para confirmar pedido\REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 # Valores de placeholder que deben considerarse faltantes
 PLACEHOLDER_VALUES = {"NOMBRE", "DIRECCIÓN", "TELÉFONO", "TIPO_PAGO"}
 
@@ -34,17 +33,14 @@ def extract_order_data(text: str):
     return None, text
 
 def get_missing_fields(data: dict):
-    """Devuelve la lista de campos REQUIRED_FIELDS que estén vacíos, nulos
-       o igual a uno de los placeholders."""
+    """Devuelve la lista de campos REQUIRED_FIELDS que estén vacíos, nulos o iguales a un placeholder."""
     missing = []
     for f in REQUIRED_FIELDS:
         val = data.get(f)
-        if (not val
-            or (isinstance(val, str) and (
-                    val.upper() in PLACEHOLDER_VALUES
-                    or val.strip().lower().startswith("tu ")
-               ))
-           ):
+        if not val or (isinstance(val, str) and (
+                val.upper() in PLACEHOLDER_VALUES or
+                val.strip().lower().startswith("tu ")
+           )):
             missing.append(f)
     return missing
 
@@ -62,24 +58,24 @@ async def handle_user_message(body: dict):
         if not text or not from_number:
             return
 
-        # 0) Manejo de datos pendientes de pedido
+        # 0) Manejo de datos pendientes: asignar cada respuesta al siguiente campo faltante
         pending = user_pending_data.get(from_number)
         if pending:
             faltantes = get_missing_fields(pending)
             if faltantes:
-                # Asignar valor al primer campo faltante
+                # Guardar el valor del usuario para el primer campo
                 campo = faltantes[0]
                 pending[campo] = text
                 user_pending_data[from_number] = pending
 
-                # Verificar si quedan más campos por pedir
+                # Verificar si quedan campos
                 faltantes = get_missing_fields(pending)
                 if faltantes:
                     etiqueta = faltantes[0].replace("_", " ")
                     send_whatsapp_message(from_number, f"📋 Por favor indícame tu *{etiqueta}*:")
                     return
 
-                # Ya tenemos todos los datos, creamos o actualizamos pedido
+                # Todos los datos listos: crear o actualizar pedido
                 now = datetime.utcnow()
                 prev = user_orders.get(from_number)
                 if prev and (now - prev["timestamp"]) <= timedelta(minutes=5):
@@ -155,17 +151,15 @@ async def handle_user_message(body: dict):
             "   - Subtotal + $5000 de envío\n"
             "   - ¿Deseas algo más?\n"
             "   - Recomienda 1 producto adicional para acompañar (guayabo, snacks, etc.)\n"
-            "   - Si dice “no”, pide datos (name, address, phone, payment_method).\n"
+            "   - Si dice “no”, pide datos (nombre, dirección, teléfono, pago).\n"
             "3. Incluye emojis y tono humano.\n"
             "4. Al confirmar, añade al final este JSON:\n"
-            '{"order_details":{"name":"NOMBRE","address":"DIRECCIÓN","phone":"TELÉFONO",'
-            '"payment_method":"TIPO_PAGO","products":[{"name":"NOMBRE","quantity":1,"price":0}],'
-            '"total":0}}\n'
+            "{\"order_details\":{\"name\":\"NOMBRE\",\"address\":\"DIRECCIÓN\",\"phone\":\"TELÉFONO\",\"payment_method\":\"TIPO_PAGO\",\"products\":[{\"name\":\"NOMBRE\",\"quantity\":1,\"price\":0}],\"total\":0}}\n"
             "Si modifica dentro de 5 min, actualiza el pedido.\n"
             "Responde como un amigo. 😄"
         )
 
-        # Reemplazamos el último mensaje en el historial con las instrucciones
+        # Reemplazar último mensaje con las instrucciones
         user_histories[from_number][-1]["text"] = instrucciones
         gemini_resp = await ask_gemini_with_history(user_histories[from_number])
 
@@ -179,7 +173,7 @@ async def handle_user_message(body: dict):
         })
         await save_message_to_supabase(from_number, "model", clean_text)
 
-        # 🔍 Recomendaciones basadas en el pedido parcial
+        # Recomendaciones si hay pedido parcial
         if order_data and order_data.get("products"):
             recomendaciones = await get_recommended_products(order_data["products"])
             if recomendaciones:
@@ -192,7 +186,7 @@ async def handle_user_message(body: dict):
 
         send_whatsapp_message(from_number, clean_text)
 
-        # 5) Procesar pedido parcial para pedir datos
+        # 5) Procesar pedido parcial para iniciar recogida de datos
         if order_data:
             pending = user_pending_data.get(from_number, {})
             pending.update(order_data)
@@ -201,7 +195,7 @@ async def handle_user_message(body: dict):
             # Normalizar placeholders
             for f in REQUIRED_FIELDS:
                 v = pending.get(f, "")
-                if isinstance(v, str) and v.strip().upper() in PLACEHOLDER_VALUES:
+                if isinstance(v, str) and v.strip().lower().startswith("tu "):
                     pending[f] = None
 
             faltantes = get_missing_fields(pending)
