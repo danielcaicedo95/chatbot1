@@ -1,44 +1,15 @@
 from datetime import datetime, timedelta
 import json
 
-from app.utils.memory import user_histories, user_orders, user_pending_data
+from app.utils.memory import user_histories
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message
 from app.services.supabase import save_message_to_supabase
-from app.services.products import get_all_products, update_product_stock, get_recommended_products
-from app.services.orders import create_order, update_order
+from app.services.products import get_all_products, get_recommended_products
+from app.services.orders import process_order
 
-# Campos obligatorios para confirmar pedido
+# Campos obligatorios para confirmar pedido (si los necesitas en este módulo, sino déjalos para validators)
 REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
-
-def find_similar_products(requested, catalog):
-    requested_lower = requested.lower()
-    exact = [p for p in catalog if requested_lower in p["name"].lower()]
-    if exact:
-        return exact
-    return [p for p in catalog if any(w in p["name"].lower() for w in requested_lower.split())]
-
-def extract_order_data(text: str):
-    """Extrae el bloque JSON de pedido y devuelve (order_data_dict, texto_sin_json)."""
-    try:
-        idx = text.rfind('{"order_details":')
-        if idx != -1:
-            end = text.rfind('}') + 1
-            js = text[idx:end]
-            parsed = json.loads(js)
-            return parsed.get("order_details"), text[:idx].strip()
-    except Exception as e:
-        print("⚠️ Error extrayendo JSON:", e)
-    return None, text
-
-def get_missing_fields(data: dict):
-    """Devuelve la lista de campos REQUIRED_FIELDS que estén vacíos o nulos."""
-    missing = []
-    for f in REQUIRED_FIELDS:
-        val = data.get(f)
-        if not val or (isinstance(val, str) and val.strip().lower().startswith("tu ")):
-            missing.append(f)
-    return missing
 
 async def handle_user_message(body: dict):
     try:
@@ -78,7 +49,7 @@ async def handle_user_message(body: dict):
         # 3) Obtener catálogo y armar prompt
         productos = await get_all_products()
         contexto = "Catálogo actual:\n" + "\n".join(
-            f"- {p['name']} ({p.get('size','botella estándar')}): ${p['price']}"
+            f"- {p['name']} ({p.get('size', 'botella estándar')}): ${p['price']}" \
             for p in productos
         )
 
@@ -95,20 +66,17 @@ async def handle_user_message(body: dict):
             "   - Si dice “no”, pide datos (nombre, dirección, teléfono, pago).\n"
             "3. Incluye emojis y tono humano.\n"
             "4. Al confirmar, añade al final este JSON:\n"
-            "```json\n"
-            '{"order_details":{"name":"NOMBRE","address":"DIRECCIÓN","phone":"TELÉFONO",'
-            '"payment_method":"TIPO_PAGO","products":[{"name":"NOMBRE","quantity":1,"price":0}],'
-            '"total":0}}\n'
-            "```\n"
+            "{\"order_details\":{\"name\":\"NOMBRE\",\"address\":\"DIRECCIÓN\",\"phone\":\"TELÉFONO\",\"payment_method\":\"TIPO_PAGO\",\"products\":[{\"name\":\"NOMBRE\",\"quantity\":1,\"price\":0}],\"total\":0}}\n"
             "Si modifica dentro de 5 min, actualiza el pedido.\n"
             "Responde como un amigo. 😄"
         )
 
-        # Reemplazamos el último mensaje
+        # Reemplazar el último mensaje en historial
         user_histories[from_number][-1]["text"] = instrucciones
         gemini_resp = await ask_gemini_with_history(user_histories[from_number])
 
-        # 4) Extraer JSON y limpiar texto
+        # 4) Extraer JSON de pedido y limpiar texto
+        from app.utils.extractors import extract_order_data
         order_data, clean_text = extract_order_data(gemini_resp)
 
         # Guardar respuesta limpia
@@ -117,94 +85,36 @@ async def handle_user_message(body: dict):
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "model", clean_text)
-        # 🔍 Buscar recomendaciones desde la base de datos según lo que pidió el usuario
-        if order_data:
-            # Fusionar campos dados por el usuario explícitamente (sin autocompletar vacíos)
-            pending = user_pending_data.get(from_number, {})
-            for key, value in order_data.items():
-                # Aceptamos solo si no es un placeholder y no es None
-                if isinstance(value, str) and value.strip().lower().startswith("tu "):
-                    continue
-                if value:  # Solo valores explícitos
-                    pending[key] = value
-            user_pending_data[from_number] = pending
 
-            # Comprobar campos faltantes
-            faltantes = get_missing_fields(pending)
-            if faltantes:
-                texto = "Para completar tu pedido necesito:\n" + "\n".join(
-                    f"- {f.replace('_',' ')}" for f in faltantes
+        # 🔍 Recomendaciones basadas en el pedido parcial
+        if order_data and order_data.get("products"):
+            recomendaciones = await get_recommended_products(order_data["products"])
+            if recomendaciones:
+                texto_rec = "\n".join(
+                    f"- {r['name']} ({r.get('size', 'estándar')}): ${r['price']}" \
+                    for r in recomendaciones
                 )
-                send_whatsapp_message(from_number, f"📋 {texto}")
-                return
-
+                clean_text += (
+                    "\n🧠 Basado en tu pedido, podrías acompañarlo con:\n" +
+                    texto_rec +
+                    "\n¿Te gustaría agregar alguno de estos?"
+                )
 
         send_whatsapp_message(from_number, clean_text)
 
-        # 5) Si hubo JSON de pedido, lo procesamos
+        # 5) Procesar pedido con lógica centralizada en orders.py
         if order_data:
-            # Fusionar en datos pendientes
-            pending = user_pending_data.get(from_number, {})
-            pending.update(order_data)
-            user_pending_data[from_number] = pending
-
-            # Marcar placeholders como vacíos
-            for f in REQUIRED_FIELDS:
-                v = pending.get(f, "")
-                if isinstance(v, str) and v.strip().lower().startswith("tu "):
-                    pending[f] = None
-
-            # Comprobar campos faltantes
-            faltantes = get_missing_fields(pending)
-            if faltantes:
-                texto = "Para completar tu pedido necesito:\n" + "\n".join(
-                    f"- {f.replace('_',' ')}" for f in faltantes
-                )
-                send_whatsapp_message(from_number, f"📋 {texto}")
-                return
-
-            # 6) Todos los datos están; creamos o actualizamos
-            now = datetime.utcnow()
-            prev = user_orders.get(from_number)
-            # Llamamos siempre con todos los parámetros nombrados
-            if prev and (now - prev["timestamp"]) <= timedelta(minutes=5):
-                updated = await update_order(
-                    phone=pending["phone"],
-                    name=pending["name"],
-                    address=pending["address"],
-                    products=pending["products"],
-                    total=float(pending["total"]),
-                    payment_method=pending["payment_method"]
-                )
-                if updated and updated.get("id"):
-                    # 🔄 También restamos stock cuando el pedido se actualiza
-                    for prod in pending["products"]:
-                        await update_product_stock(prod["name"], prod["quantity"])
-                    send_whatsapp_message(from_number, "♻️ Pedido actualizado y stock descontado correctamente.")
-                    # Limpiar datos pendientes
-                    user_pending_data.pop(from_number, None)
-                else:
-                    send_whatsapp_message(from_number, "❌ No pude actualizar tu pedido. Intenta de nuevo.")
+            result = await process_order(from_number, order_data)
+            status = result.get("status")
+            if status == "missing":
+                campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
+                send_whatsapp_message(from_number, f"📋 Para completar tu pedido necesito:\n{campos}")
+            elif status == "created":
+                send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
+            elif status == "updated":
+                send_whatsapp_message(from_number, "♻️ Pedido actualizado y stock descontado correctamente.")
             else:
-                new = await create_order(
-                    phone=pending["phone"],
-                    name=pending["name"],
-                    address=pending["address"],
-                    products=pending["products"],
-                    total=float(pending["total"]),
-                    payment_method=pending["payment_method"]
-                )
-                if new and new.get("id"):
-                    user_orders[from_number] = {"id": new["id"], "timestamp": now}
-                    # 🔄 Restar inventario por cada producto comprado
-                    for prod in pending["products"]:
-                        await update_product_stock(prod["name"], prod["quantity"])
-                    send_whatsapp_message(from_number, "✅ ¡Tu pedido ha sido confirmado! Gracias 🥳")
-                    # Limpiar datos pendientes
-                    user_pending_data.pop(from_number, None)
-                else:
-                    send_whatsapp_message(from_number, "❌ Lo siento, no pude guardar tu pedido. Intenta de nuevo.")
-
+                send_whatsapp_message(from_number, "❌ Ocurrió un error guardando tu pedido.")
 
     except Exception as e:
         print("❌ Error procesando mensaje:", e)
