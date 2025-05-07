@@ -67,10 +67,21 @@ async def handle_user_message(body: dict):
             sent = False
             for p in productos:
                 if p["name"].lower() in text:
-                    print(f"🔍 [DEBUG] Sending images for product: {p['name']}")
-                    for img in p.get("product_images", []):
-                        send_whatsapp_image(from_number, img["url"], caption=p["name"])
-                        sent = True
+                    imgs = p.get("product_images", [])
+                    if not imgs:
+                        print(f"⚠️ [DEBUG] No images found for: {p['name']}")
+                        continue
+                    for img in imgs:
+                        url = img.get("url")
+                        if not url:
+                            print(f"⚠️ [DEBUG] Image missing URL for: {p['name']}")
+                            continue
+                        try:
+                            print(f"📤 [DEBUG] Sending image for '{p['name']}' → {url}")
+                            send_whatsapp_image(from_number, url, caption=p["name"])
+                            sent = True
+                        except Exception as err:
+                            print(f"❌ [ERROR] Failed to send image: {url}\n{err}")
             if not sent:
                 send_whatsapp_message(from_number, "No encontré imágenes de ese producto.")
             return
