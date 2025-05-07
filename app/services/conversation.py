@@ -60,31 +60,45 @@ async def handle_user_message(body: dict):
             send_whatsapp_message(from_number, saludo)
             return
 
-        # --- 4) Petición de fotos específicas ---
+                # --- 4) Petición de fotos específicas via LLM ---
         if re.search(r"\bfoto(s)?\b|\bimagen(es)?\b", text):
-            print("🔍 [DEBUG] Detected image request")
+            print("🔍 [DEBUG] Detected image request (delegating to LLM for product identification)")
             productos = await get_all_products()
-            sent = False
-            for p in productos:
-                if p["name"].lower() in text:
-                    imgs = p.get("product_images", [])
-                    if not imgs:
-                        print(f"⚠️ [DEBUG] No images found for: {p['name']}")
-                        continue
+            # Construir prompt para preguntar al LLM qué producto
+            nombres = [p["name"] for p in productos]
+            prompt = (
+                "El usuario ha pedido imágenes de un producto. "
+                f"Este es el catálogo: {', '.join(nombres)}.\n"
+                "¿De cuál de estos productos quiere ver imágenes? "
+                "Responde solo con el nombre EXACTO del producto."
+            )
+            # Llamamos a Gemini para clasificar
+            resp = await ask_gemini_with_history(
+                user_histories[from_number] + [{"role": "system", "text": prompt}]
+            )
+            # Extraer nombre de producto
+            producto_nombre = None
+            for name in nombres:
+                if name.lower() in resp.lower():
+                    producto_nombre = name
+                    break
+            if producto_nombre:
+                # Enviar imágenes de ese producto
+                producto = next(p for p in productos if p["name"] == producto_nombre)
+                imgs = producto.get("product_images", [])
+                if imgs:
                     for img in imgs:
-                        url = img.get("url")
-                        if not url:
-                            print(f"⚠️ [DEBUG] Image missing URL for: {p['name']}")
-                            continue
-                        try:
-                            print(f"📤 [DEBUG] Sending image for '{p['name']}' → {url}")
-                            send_whatsapp_image(from_number, url, caption=p["name"])
-                            sent = True
-                        except Exception as err:
-                            print(f"❌ [ERROR] Failed to send image: {url}\n{err}")
-            if not sent:
-                send_whatsapp_message(from_number, "No encontré imágenes de ese producto.")
+                        print(f"📤 [DEBUG] Sending image for '{producto_nombre}' → {img['url']}")
+                        send_whatsapp_image(from_number, img["url"], caption=producto_nombre)
+                    return
+            # Fallback: no identificó correctamente
+            send_whatsapp_message(
+                from_number,
+                "Lo siento, no entendí bien cuál producto te interesa. "
+                "¿Podrías escribir el nombre exacto, por favor?"
+            )
             return
+
 
         # --- 5) Construir contexto rico con variantes e imágenes ---
         productos = await get_all_products()
