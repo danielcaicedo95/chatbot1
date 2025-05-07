@@ -4,4 +4,6 @@ python-dotenv
 httpx
 requests
 python-multipart
-difflib
+openai
+google-generativeai
+supabase
