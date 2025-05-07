@@ -47,14 +47,10 @@ async def handle_user_message(body: dict):
 
         # 3) Saludo inicial si es primera interacción
         if len(user_histories[from_number]) == 1:
-            saludo = (
-                "¡Hola! 👋 Soy Lucas, tu asistente de Licores El Roble.",
-                "¿En qué puedo ayudarte hoy?"
-            )
-            full_saludo = " ".join(saludo)
-            user_histories[from_number].append({"role": "model", "text": full_saludo, "time": datetime.utcnow().isoformat()})
-            await save_message_to_supabase(from_number, "model", full_saludo)
-            send_whatsapp_message(from_number, full_saludo)
+            saludo = "¡Hola! 👋 Soy Lucas, tu asistente de Licores El Roble. ¿En qué puedo ayudarte hoy?"
+            user_histories[from_number].append({"role": "model", "text": saludo, "time": datetime.utcnow().isoformat()})
+            await save_message_to_supabase(from_number, "model", saludo)
+            send_whatsapp_message(from_number, saludo)
             return
 
         # 4) Obtener catálogo completo con variantes e imágenes
@@ -68,7 +64,7 @@ async def handle_user_message(body: dict):
                 "Eres un asistente que detecta si el usuario quiere ver imágenes de un producto.\n"
                 f"Catálogo: {', '.join(nombres)}.\n"
                 f"Mensaje: '{raw_text}'.\n"
-                "Responde con un JSON válido sin MarkDown, ejemplo:"
+                "Responde con un JSON válido sin Markdown, ejemplo:"
                 "{'send_images': true, 'product_name': 'Vodka Absolut'} o {'send_images': false}."
             )
             llm_input = user_histories[from_number][-10:] + [{"role": "user", "text": prompt}]
@@ -85,10 +81,14 @@ async def handle_user_message(body: dict):
                     print(f"⚠️ [DEBUG] JSON parse error: {e}")
             print("🔍 [DEBUG] Parsed action:", action)
 
+            # Si la IA confirma envío de imágenes
             if action.get("send_images"):
                 prod_name = action.get("product_name", "").strip()
+                # Manejo de 'todos los...' para enviar imagenes de todos
+                send_all = prod_name.lower().startswith("todos")
+
                 # Coincidencia exacta o difusa
-                if prod_name not in nombres:
+                if not send_all and prod_name not in nombres:
                     matches = get_close_matches(prod_name, nombres, n=1, cutoff=0.6)
                     if matches:
                         prod_name = matches[0]
@@ -96,30 +96,47 @@ async def handle_user_message(body: dict):
                     else:
                         send_whatsapp_message(from_number, f"No encontré '{prod_name}'. ¿Puedes verificar el nombre? 😕")
                         return
-                # Confirmación humana
-                send_whatsapp_message(from_number, f"¡Claro! 😊 Buscando imágenes de *{prod_name}*...")
-                producto = next((p for p in productos if p["name"] == prod_name), None)
-                # Enviar todas las imágenes del producto y sus variantes
-                imgs = producto.get("product_images", []) if producto else []
-                # Incluir imágenes de variantes si existen
-                variantes = producto.get("product_variants", []) if producto else []
-                for v in variantes:
-                    imgs.extend(v.get("product_images", []))
 
-                if not imgs:
-                    send_whatsapp_message(from_number, f"Lo siento, no tenemos imágenes de *{prod_name}* por ahora. 😔")
+                # Confirmación humana
+                if send_all:
+                    send_whatsapp_message(from_number, "¡Claro! 😊 Te envío imágenes de todos nuestros productos...")
+                else:
+                    send_whatsapp_message(from_number, f"¡Claro! 😊 Buscando imágenes de *{prod_name}*...")
+
+                # Recopilar imágenes
+                urls = []
+                targets = productos if send_all else [p for p in productos if p["name"] == prod_name]
+                for producto in targets:
+                    # Imágenes del producto
+                    for img in producto.get("product_images", []):
+                        urls.append((producto["name"], img.get("url")))
+                    # Imágenes de variantes
+                    for variant in producto.get("product_variants", []):
+                        for img in variant.get("product_images", []):
+                            urls.append((producto["name"], img.get("url")))
+
+                # Eliminar duplicados preservando orden
+                seen = set()
+                unique = []
+                for name, url in urls:
+                    if url and url not in seen:
+                        seen.add(url)
+                        unique.append((name, url))
+
+                if not unique:
+                    send_whatsapp_message(from_number, f"Lo siento, no encontramos imágenes para '{prod_name}'. 😔")
                     return
-                # Envío robusto
-                for img in imgs:
-                    url = img.get("url")
+
+                # Envío robusto de cada imagen
+                for name, url in unique:
                     try:
-                        send_whatsapp_image(from_number, url, caption=prod_name)
+                        send_whatsapp_image(from_number, url, caption=name)
                     except Exception as e:
                         print(f"❌ [ERROR] sending image {url}: {e}")
-                        send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {prod_name}.")
+                        send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {name}.")
                 return
 
-        # 6) Construir contexto rico (texto) incluyendo variantes e imágenes
+        # 6) Construir contexto rico (texto) incluyendo variantes e imágenes disponibles
         contexto_lines = []
         for p in productos:
             line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
@@ -148,7 +165,6 @@ async def handle_user_message(body: dict):
             "4. Si el usuario dice 'no', solicita nombre, dirección, teléfono y método de pago.\n"
             "5. Al final, incluye un JSON exacto en 'order_details'."
         )
-        # Enviar prompt de pedido
         user_histories[from_number].append({"role": "user", "text": instrucciones})
         llm_resp2 = await ask_gemini_with_history(user_histories[from_number])
         print("💬 [DEBUG] LLM order flow response:\n", llm_resp2)
@@ -167,7 +183,8 @@ async def handle_user_message(body: dict):
             recomendaciones = await get_recommended_products(order_data["products"])
             if recomendaciones:
                 texto_rec = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
-                send_whatsapp_message(from_number, f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?"
+                send_whatsapp_message(from_number,
+                    f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?"
                 )
 
         if not order_data:
