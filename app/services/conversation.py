@@ -109,32 +109,51 @@ async def handle_user_message(body: dict):
                 for producto in targets:
                     # Imágenes del producto
                     for img in producto.get("product_images", []):
-                        urls.append((producto["name"], img.get("url")))
+                        url = img.get("url")
+                        if url:
+                            urls.append((producto["name"], url))
                     # Imágenes de variantes
                     for variant in producto.get("product_variants", []):
                         for img in variant.get("product_images", []):
-                            urls.append((producto["name"], img.get("url")))
+                            url = img.get("url")
+                            if url:
+                                urls.append((producto["name"], url))
 
                 # Eliminar duplicados preservando orden
                 seen = set()
                 unique = []
                 for name, url in urls:
-                    if url and url not in seen:
+                    if url not in seen:
                         seen.add(url)
                         unique.append((name, url))
 
-                if not unique:
-                    send_whatsapp_message(from_number, f"Lo siento, no encontramos imágenes para '{prod_name}'. 😔")
+                # Filtrar solo formatos soportados por WhatsApp
+                supported = []
+                for name, url in unique:
+                    if url.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        supported.append((name, url))
+                    else:
+                        print(f"⚠️ [DEBUG] URL skip unsupported format: {url}")
+
+                if not supported:
+                    send_whatsapp_message(from_number, f"Lo siento, las imágenes disponibles no están en un formato compatible con WhatsApp. 😔")
                     return
 
-                # Envío robusto de cada imagen
-                for name, url in unique:
+                # Envío robusto de cada imagen compatible
+                for name, url in supported:
                     try:
                         send_whatsapp_image(from_number, url, caption=name)
                     except Exception as e:
                         print(f"❌ [ERROR] sending image {url}: {e}")
-                        send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {name}.")
-                return
+                        send_whatsapp_message(from_number, f"Ocurrió un error enviando la imagen de {name}.")
+                # Envío robusto de cada imagen
+                        for name, url in unique:
+                            try:
+                                send_whatsapp_image(from_number, url, caption=name)
+                            except Exception as e:
+                                    print(f"❌ [ERROR] sending image {url}: {e}")
+                                    send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {name}.")
+                            return
 
         # 6) Construir contexto rico (texto) incluyendo variantes e imágenes disponibles
         contexto_lines = []
