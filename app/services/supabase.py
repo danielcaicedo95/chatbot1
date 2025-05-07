@@ -2,6 +2,8 @@
 import httpx
 from datetime import datetime
 from app.core.config import SUPABASE_URL, SUPABASE_KEY
+import uuid
+from typing import Tuple
 
 # Cabeceras globales para Supabase
 headers = {
@@ -65,3 +67,33 @@ async def update_order_in_supabase(order_id: str, order_data: dict):
         print("✏️ Pedido actualizado en Supabase:", resp.status_code, resp.text)
         data = resp.json()
         return data[0] if isinstance(data, list) and data else None
+
+
+
+
+async def upload_image_to_supabase_storage(file_data: bytes, filename: str, content_type: str) -> Tuple[bool, str]:
+    """
+    Sube una imagen a Supabase Storage (bucket: 'product-images').
+    Retorna (True, url) si fue exitoso, o (False, mensaje de error) si falló.
+    """
+    # Crear nombre único en el bucket
+    ext = filename.split(".")[-1]
+    unique_filename = f"{uuid.uuid4()}.{ext}"
+    path = f"products/{unique_filename}"
+    
+    url = f"{SUPABASE_URL}/storage/v1/object/product-images/{path}"
+    headers_upload = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": content_type,
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, content=file_data, headers=headers_upload)
+
+        if resp.status_code == 200:
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/product-images/{path}"
+            return True, public_url
+        else:
+            print("❌ Error subiendo imagen:", resp.status_code, resp.text)
+            return False, resp.text
