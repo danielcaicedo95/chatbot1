@@ -85,7 +85,6 @@ async def handle_user_message(body: dict):
             # Si la IA confirma envío de imágenes
             if action.get("send_images"):
                 prod_name = action.get("product_name", "").strip()
-                # Manejo de 'todos los...' para enviar imagenes de todos
                 send_all = prod_name.lower().startswith("todos")
 
                 # Coincidencia exacta o difusa
@@ -104,21 +103,45 @@ async def handle_user_message(body: dict):
                 else:
                     send_whatsapp_message(from_number, f"¡Claro! 😊 Buscando imágenes de *{prod_name}*...")
 
-                # Recopilar imágenes
+                # Recopilar imágenes (producto vs variante)
                 urls = []
-                targets = productos if send_all else [p for p in productos if p["name"] == prod_name]
+                # Determinar targets: producto o todos
+                if send_all:
+                    targets = productos
+                else:
+                    base_product = next((p for p in productos if p["name"] == prod_name), None)
+                    if not base_product:
+                        send_whatsapp_message(from_number, f"No encontré el producto {prod_name}.")
+                        return
+                    # Detectar variante
+                    variant = None
+                    for v in base_product.get("product_variants", []):
+                        opts = [str(val).lower() for val in v.get("options", {}).values()]
+                        if any(opt in prod_name.lower() for opt in opts):
+                            variant = v
+                            break
+                    if variant:
+                        print(f"🔍 [DEBUG] Detected variant: {variant.get('options')}")
+                        targets = []
+                        for img in variant.get("product_images", []):
+                            url = img.get("url")
+                            if url:
+                                urls.append((prod_name, url))
+                    else:
+                        targets = [base_product]
+
+                # Recopilar de targets: productos y variantes si corresponde
                 for producto in targets:
-                    # Imágenes del producto
                     for img in producto.get("product_images", []):
                         url = img.get("url")
                         if url:
                             urls.append((producto["name"], url))
-                    # Imágenes de variantes
-                    for variant in producto.get("product_variants", []):
-                        for img in variant.get("product_images", []):
-                            url = img.get("url")
-                            if url:
-                                urls.append((producto["name"], url))
+                    if send_all or variant is None:
+                        for v in producto.get("product_variants", []):
+                            for img in v.get("product_images", []):
+                                url = img.get("url")
+                                if url:
+                                    urls.append((producto["name"], url))
 
                 # Eliminar duplicados preservando orden
                 seen = set()
@@ -128,35 +151,28 @@ async def handle_user_message(body: dict):
                         seen.add(url)
                         unique.append((name, url))
 
-                # Filtrar solo formatos soportados por WhatsApp
+                # Filtrar formatos compatibles
                 supported = []
                 for name, url in unique:
-                    if url.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    if url.lower().endswith((".png", ".jpg", ".jpeg")):
                         supported.append((name, url))
                     else:
                         print(f"⚠️ [DEBUG] URL skip unsupported format: {url}")
 
                 if not supported:
-                    send_whatsapp_message(from_number, f"Lo siento, las imágenes disponibles no están en un formato compatible con WhatsApp. 😔")
+                    send_whatsapp_message(from_number, "Lo siento, las imágenes disponibles no están en un formato compatible con WhatsApp. 😔")
                     return
 
-                # Envío robusto de cada imagen compatible
+                # Envío robusto
                 for name, url in supported:
                     try:
                         send_whatsapp_image(from_number, url, caption=name)
                     except Exception as e:
                         print(f"❌ [ERROR] sending image {url}: {e}")
                         send_whatsapp_message(from_number, f"Ocurrió un error enviando la imagen de {name}.")
-                # Envío robusto de cada imagen
-                    for name, url in unique:
-                        try:
-                            send_whatsapp_image(from_number, url, caption=name)
-                        except Exception as e:
-                            print(f"❌ [ERROR] sending image {url}: {e}")
-                            send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {name}.")
-                        return
+                return
 
-        # 6) Construir contexto rico (texto) incluyendo variantes e imágenes disponibles
+        # 6) Construir contexto rico (texto)
         contexto_lines = []
         for p in productos:
             line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
@@ -198,12 +214,13 @@ async def handle_user_message(body: dict):
         user_histories[from_number].append({"role": "model", "text": clean_text, "time": datetime.utcnow().isoformat()})
         await save_message_to_supabase(from_number, "model", clean_text)
 
-        # 9) Recomendaciones y envío de mensajes finales
+        # 9) Recomendaciones y mensajes finales
         if order_data and order_data.get("products"):
             recomendaciones = await get_recommended_products(order_data["products"])
             if recomendaciones:
                 texto_rec = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
-                send_whatsapp_message(from_number,
+                send_whatsapp_message(
+                    from_number,
                     f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?"
                 )
 
