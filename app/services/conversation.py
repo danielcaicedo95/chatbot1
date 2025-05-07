@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import traceback
 
 from app.utils.memory import user_histories
 from app.clients.gemini import ask_gemini_with_history
@@ -16,18 +17,24 @@ REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
 async def handle_user_message(body: dict):
     try:
+        print("🔍 [DEBUG] Incoming webhook payload:", body)
+
         # --- 1) Obtener el mensaje del webhook ---
         entry = body["entry"][0]
         changes = entry["changes"][0]
         messages = changes["value"].get("messages")
         if not messages:
+            print("⚠️ [DEBUG] No messages in payload")
             return
 
         msg = messages[0]
         raw_text = msg.get("text", {}).get("body", "").strip()
         text = raw_text.lower()
         from_number = msg.get("from")
+        print(f"🔍 [DEBUG] From: {from_number}, Text: {raw_text}")
+
         if not raw_text or not from_number:
+            print("⚠️ [DEBUG] Missing text or from_number")
             return
 
         # --- 2) Guardar usuario → historial y Supabase ---
@@ -55,12 +62,12 @@ async def handle_user_message(body: dict):
 
         # --- 4) Petición de fotos específicas ---
         if re.search(r"\bfoto(s)?\b|\bimagen(es)?\b", text):
+            print("🔍 [DEBUG] Detected image request")
             productos = await get_all_products()
             sent = False
-            # buscar menciones de producto en el texto
             for p in productos:
                 if p["name"].lower() in text:
-                    # enviar cada URL como media
+                    print(f"🔍 [DEBUG] Sending images for product: {p['name']}")
                     for img in p.get("product_images", []):
                         send_whatsapp_image(from_number, img["url"], caption=p["name"])
                         sent = True
@@ -85,6 +92,7 @@ async def handle_user_message(body: dict):
                 line += f" | Imágenes: {len(imgs)}"
             contexto_lines.append(line)
         contexto = "Catálogo actual:\n" + "\n".join(contexto_lines)
+        print("🔍 [DEBUG] Contexto construido:\n", contexto)
 
         # --- 6) Instrucciones para el modelo ---
         instrucciones = (
@@ -107,10 +115,13 @@ async def handle_user_message(body: dict):
         # reescribir última entrada del historial con el prompt completo
         user_histories[from_number][-1]["text"] = instrucciones
         gemini_resp = await ask_gemini_with_history(user_histories[from_number])
+        print("💬 [DEBUG] Raw LLM response:", gemini_resp)
 
         # --- 7) Extraer JSON de pedido y limpiar texto ---
         from app.utils.extractors import extract_order_data
         order_data, clean_text = extract_order_data(gemini_resp)
+        print("🔍 [DEBUG] Extracted order_data:", order_data)
+        print("🔍 [DEBUG] Clean text:", clean_text)
 
         # Guardar respuesta limpia
         user_histories[from_number].append({
@@ -123,6 +134,7 @@ async def handle_user_message(body: dict):
         # --- 8) Recomendaciones si hay productos en el pedido parcial ---
         if order_data and order_data.get("products"):
             recomendaciones = await get_recommended_products(order_data["products"])
+            print("🔍 [DEBUG] Recommended products:", recomendaciones)
             if recomendaciones:
                 texto_rec = "\n".join(
                     f"- {r['name']}: COP {r['price']}"
@@ -138,6 +150,7 @@ async def handle_user_message(body: dict):
         # --- 9) Procesar la orden si se obtuvo JSON válido ---
         if order_data:
             result = await process_order(from_number, order_data)
+            print("🔍 [DEBUG] process_order result:", result)
             status = result.get("status")
             if status == "missing":
                 campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
@@ -150,4 +163,4 @@ async def handle_user_message(body: dict):
                 send_whatsapp_message(from_number, "❌ Error guardando el pedido.")
 
     except Exception as e:
-        print("❌ Error procesando mensaje:", e)
+        print("❌ [ERROR] Exception in handle_user_message:\n", traceback.format_exc())
