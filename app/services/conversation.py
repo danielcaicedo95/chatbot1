@@ -17,12 +17,14 @@ REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
 async def handle_user_message(body: dict):
     try:
-        print("🔍 [DEBUG] Incoming webhook payload:", body)
+        print("🔍 [DEBUG] Incoming webhook payload:", json.dumps(body, indent=2))
 
         # --- 1) Obtener el mensaje del webhook ---
-        entry = body["entry"][0]
-        changes = entry["changes"][0]
-        messages = changes["value"].get("messages")
+        entry = body.get("entry", [None])[0]
+        print("🔍 [DEBUG] Parsed entry:", entry)
+        changes = entry.get("changes", [None])[0] if entry else None
+        print("🔍 [DEBUG] Parsed changes:", changes)
+        messages = changes.get("value", {}).get("messages") if changes else None
         if not messages:
             print("⚠️ [DEBUG] No messages in payload")
             return
@@ -31,10 +33,10 @@ async def handle_user_message(body: dict):
         raw_text = msg.get("text", {}).get("body", "").strip()
         text = raw_text.lower()
         from_number = msg.get("from")
-        print(f"🔍 [DEBUG] From: {from_number}, Text: {raw_text}")
+        print(f"🔍 [DEBUG] From: {from_number}, Text: '{raw_text}'")
 
         if not raw_text or not from_number:
-            print("⚠️ [DEBUG] Missing text or from_number")
+            print("⚠️ [DEBUG] Missing text or from_number, aborting.")
             return
 
         # --- 2) Guardar usuario → historial y Supabase ---
@@ -43,7 +45,9 @@ async def handle_user_message(body: dict):
             "text": raw_text,
             "time": datetime.utcnow().isoformat()
         })
+        print("🔍 [DEBUG] Saved to local history")
         await save_message_to_supabase(from_number, "user", raw_text)
+        print("🔍 [DEBUG] Saved to Supabase")
 
         # --- 3) Primer saludo ---
         if len(user_histories[from_number]) == 1:
@@ -57,25 +61,34 @@ async def handle_user_message(body: dict):
                 "time": datetime.utcnow().isoformat()
             })
             await save_message_to_supabase(from_number, "model", saludo)
+            print("🔍 [DEBUG] Sending first greeting")
             send_whatsapp_message(from_number, saludo)
             return
 
-                # --- 4) Petición de fotos específicas via LLM ---
+        # --- 4) Petición de fotos específicas via LLM ---
         if re.search(r"\bfoto(s)?\b|\bimagen(es)?\b", text):
-            print("🔍 [DEBUG] Detected image request (delegating to LLM for product identification)")
+            print("🔍 [DEBUG] Detected image request via keywords")
             productos = await get_all_products()
+            print(f"🔍 [DEBUG] Retrieved {len(productos)} products")
+            for p in productos:
+                print(f"  - {p['name']} (images: {len(p.get('product_images', []))})")
+
             # Construir prompt para preguntar al LLM qué producto
             nombres = [p["name"] for p in productos]
+            print("🔍 [DEBUG] Product names:", nombres)
             prompt = (
                 "El usuario ha pedido imágenes de un producto. "
                 f"Este es el catálogo: {', '.join(nombres)}.\n"
                 "¿De cuál de estos productos quiere ver imágenes? "
                 "Responde solo con el nombre EXACTO del producto."
             )
+            print("🔍 [DEBUG] Prompt to LLM:\n", prompt)
+
             # Llamamos a Gemini para clasificar
             user_histories[from_number].append({"role": "user", "text": "Quiero ver imágenes de un producto."})
             user_histories[from_number].append({"role": "user", "text": prompt})
             resp = await ask_gemini_with_history(user_histories[from_number])
+            print("🔍 [DEBUG] Gemini response:", resp)
 
             # Extraer nombre de producto
             producto_nombre = None
@@ -83,16 +96,24 @@ async def handle_user_message(body: dict):
                 if name.lower() in resp.lower():
                     producto_nombre = name
                     break
+            print("🔍 [DEBUG] Matched product name:", producto_nombre)
+
             if producto_nombre:
-                # Enviar imágenes de ese producto
-                producto = next(p for p in productos if p["name"] == producto_nombre)
-                imgs = producto.get("product_images", [])
+                producto = next((p for p in productos if p["name"] == producto_nombre), None)
+                print("🔍 [DEBUG] Selected product object:", producto)
+                imgs = producto.get("product_images", []) if producto else []
+                print(f"🔍 [DEBUG] Found {len(imgs)} images for '{producto_nombre}'")
                 if imgs:
                     for img in imgs:
-                        print(f"📤 [DEBUG] Sending image for '{producto_nombre}' → {img['url']}")
-                        send_whatsapp_image(from_number, img["url"], caption=producto_nombre)
+                        url = img.get('url')
+                        print(f"📤 [DEBUG] Sending image for '{producto_nombre}' → {url}")
+                        send_whatsapp_image(from_number, url, caption=producto_nombre)
                     return
-            # Fallback: no identificó correctamente
+                else:
+                    print("⚠️ [DEBUG] No images found, fallback messaging")
+            else:
+                print("⚠️ [DEBUG] No matching product, fallback messaging")
+
             send_whatsapp_message(
                 from_number,
                 "Lo siento, no entendí bien cuál producto te interesa. "
