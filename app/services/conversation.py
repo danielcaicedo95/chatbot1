@@ -1,3 +1,4 @@
+
 # app/services/conversation.py
 
 from datetime import datetime
@@ -147,13 +148,13 @@ async def handle_user_message(body: dict):
                         print(f"❌ [ERROR] sending image {url}: {e}")
                         send_whatsapp_message(from_number, f"Ocurrió un error enviando la imagen de {name}.")
                 # Envío robusto de cada imagen
-                        for name, url in unique:
-                            try:
-                                send_whatsapp_image(from_number, url, caption=name)
-                            except Exception as e:
-                                    print(f"❌ [ERROR] sending image {url}: {e}")
-                                    send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {name}.")
-                            return
+                    for name, url in unique:
+                        try:
+                            send_whatsapp_image(from_number, url, caption=name)
+                        except Exception as e:
+                            print(f"❌ [ERROR] sending image {url}: {e}")
+                            send_whatsapp_message(from_number, f"Ocurrió un error enviando imagen de {name}.")
+                        return
 
         # 6) Construir contexto rico (texto) incluyendo variantes e imágenes disponibles
         contexto_lines = []
