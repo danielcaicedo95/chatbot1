@@ -73,9 +73,10 @@ async def handle_user_message(body: dict):
                 "Responde solo con el nombre EXACTO del producto."
             )
             # Llamamos a Gemini para clasificar
-            resp = await ask_gemini_with_history(
-                user_histories[from_number] + [{"role": "system", "text": prompt}]
-            )
+            user_histories[from_number].append({"role": "user", "text": "Quiero ver imágenes de un producto."})
+            user_histories[from_number].append({"role": "user", "text": prompt})
+            resp = await ask_gemini_with_history(user_histories[from_number])
+
             # Extraer nombre de producto
             producto_nombre = None
             for name in nombres:
