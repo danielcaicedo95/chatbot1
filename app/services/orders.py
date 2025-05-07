@@ -1,5 +1,9 @@
 # app/services/orders.py
+
 from datetime import datetime, timedelta, timezone
+
+import httpx
+from app.core.config import SUPABASE_URL, SUPABASE_KEY
 
 from app.services.supabase import (
     save_order_to_supabase,
@@ -9,6 +13,23 @@ from app.services.supabase import (
 from app.services.products import update_product_stock
 from app.utils.memory import user_orders, user_pending_data
 from app.utils.validators import get_missing_fields, REQUIRED_FIELDS
+
+# Cabeceras para Supabase REST
+_order_headers = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
+
+async def get_all_orders():
+    """
+    Retorna todas las órdenes, ordenadas por `created_at` descendente.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/orders?select=*&order=created_at.desc"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=_order_headers)
+        resp.raise_for_status()
+        return resp.json()
 
 
 async def create_order(
