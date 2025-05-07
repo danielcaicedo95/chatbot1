@@ -1,10 +1,11 @@
 # app/services/conversation.py
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import json
-import re
 import traceback
+from difflib import get_close_matches
 
+import re
 from app.utils.memory import user_histories
 from app.clients.gemini import ask_gemini_with_history
 from app.clients.whatsapp import send_whatsapp_message, send_whatsapp_image
@@ -17,160 +18,139 @@ REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
 async def handle_user_message(body: dict):
     try:
-        print("🔍 [DEBUG] Incoming webhook payload:", json.dumps(body, indent=2))
-
-        # --- 1) Obtener el mensaje del webhook ---
-        entry = body.get("entry", [None])[0]
-        print("🔍 [DEBUG] Parsed entry:", entry)
-        changes = entry.get("changes", [None])[0] if entry else None
-        print("🔍 [DEBUG] Parsed changes:", changes)
-        messages = changes.get("value", {}).get("messages") if changes else None
+        # 1) Depuración inicial del payload
+        print("🔍 [DEBUG] Incoming webhook payload:\n", json.dumps(body, indent=2, ensure_ascii=False))
+        entry = body.get("entry", [{}])[0]
+        changes = entry.get("changes", [{}])[0]
+        messages = changes.get("value", {}).get("messages")
         if not messages:
             print("⚠️ [DEBUG] No messages in payload")
             return
 
         msg = messages[0]
         raw_text = msg.get("text", {}).get("body", "").strip()
-        text = raw_text.lower()
         from_number = msg.get("from")
         print(f"🔍 [DEBUG] From: {from_number}, Text: '{raw_text}'")
 
         if not raw_text or not from_number:
-            print("⚠️ [DEBUG] Missing text or from_number, aborting.")
+            print("⚠️ [DEBUG] Missing text or from_number")
             return
 
-        # --- 2) Guardar usuario → historial y Supabase ---
+        # 2) Guardar en memoria local y Supabase
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": raw_text,
             "time": datetime.utcnow().isoformat()
         })
-        print("🔍 [DEBUG] Saved to local history")
         await save_message_to_supabase(from_number, "user", raw_text)
-        print("🔍 [DEBUG] Saved to Supabase")
+        print("🔍 [DEBUG] User message saved")
 
-        # --- 3) Primer saludo ---
+        # 3) Saludo inicial humano
         if len(user_histories[from_number]) == 1:
-            saludo = (
-                "¡Hola! 👋 Soy el asistente de *Licores El Roble*.\n"
-                "¿Quieres ver nuestro catálogo, resolver alguna duda o hacer un pedido? 🍻"
-            )
+            saludo = "¡Hola! 👋 Soy Lucas, tu asistente de Licores El Roble. ¿En qué puedo ayudarte hoy?"
             user_histories[from_number].append({
                 "role": "model",
                 "text": saludo,
                 "time": datetime.utcnow().isoformat()
             })
             await save_message_to_supabase(from_number, "model", saludo)
-            print("🔍 [DEBUG] Sending first greeting")
             send_whatsapp_message(from_number, saludo)
             return
 
-        # --- 4) Petición de fotos específicas via LLM ---
-        if re.search(r"\bfoto(s)?\b|\bimagen(es)?\b", text):
-            print("🔍 [DEBUG] Detected image request via keywords")
-            productos = await get_all_products()
-            print(f"🔍 [DEBUG] Retrieved {len(productos)} products")
-            for p in productos:
-                print(f"  - {p['name']} (images: {len(p.get('product_images', []))})")
+        # 4) Detección de petición de imágenes vía IA
+        productos = await get_all_products()
+        nombres = [p["name"] for p in productos]
 
-            # Construir prompt para preguntar al LLM qué producto
-            nombres = [p["name"] for p in productos]
-            print("🔍 [DEBUG] Product names:", nombres)
-            prompt = (
-                "El usuario ha pedido imágenes de un producto. "
-                f"Este es el catálogo: {', '.join(nombres)}.\n"
-                "¿De cuál de estos productos quiere ver imágenes? "
-                "Responde solo con el nombre EXACTO del producto."
-            )
-            print("🔍 [DEBUG] Prompt to LLM:\n", prompt)
+        image_intent_prompt = (
+            "Eres un asistente que detecta si el usuario quiere ver imágenes de un producto.\n"
+            f"Catálogo: {', '.join(nombres)}.\n"
+            f"Usuario: '{raw_text}'.\n"
+            "Si solicita imágenes, responde un JSON con {send_images: true, product_name: '...'};"
+            "si no, {send_images: false}."
+        )
+        llm_input = user_histories[from_number][-10:] + [{"role": "user", "text": image_intent_prompt}]
+        llm_resp = await ask_gemini_with_history(llm_input)
+        print("🔍 [DEBUG] LLM image intent response:", llm_resp)
 
-            # Llamamos a Gemini para clasificar
-            user_histories[from_number].append({"role": "user", "text": "Quiero ver imágenes de un producto."})
-            user_histories[from_number].append({"role": "user", "text": prompt})
-            resp = await ask_gemini_with_history(user_histories[from_number])
-            print("🔍 [DEBUG] Gemini response:", resp)
+        action = {"send_images": False}
+        try:
+            action = json.loads(llm_resp)
+        except json.JSONDecodeError:
+            print("⚠️ [DEBUG] LLM response no es JSON válido, ignorando envío de imágenes.")
 
-            # Extraer nombre de producto
-            producto_nombre = None
-            for name in nombres:
-                if name.lower() in resp.lower():
-                    producto_nombre = name
-                    break
-            print("🔍 [DEBUG] Matched product name:", producto_nombre)
-
-            if producto_nombre:
-                producto = next((p for p in productos if p["name"] == producto_nombre), None)
-                print("🔍 [DEBUG] Selected product object:", producto)
-                imgs = producto.get("product_images", []) if producto else []
-                print(f"🔍 [DEBUG] Found {len(imgs)} images for '{producto_nombre}'")
-                if imgs:
-                    for img in imgs:
-                        url = img.get('url')
-                        print(f"📤 [DEBUG] Sending image for '{producto_nombre}' → {url}")
-                        send_whatsapp_image(from_number, url, caption=producto_nombre)
-                    return
+        if action.get("send_images"):
+            prod_name = action.get("product_name", "").strip()
+            if prod_name not in nombres:
+                matches = get_close_matches(prod_name, nombres, n=1, cutoff=0.6)
+                if matches:
+                    print(f"🔍 [DEBUG] Fuzzy match: '{prod_name}' → '{matches[0]}'")
+                    prod_name = matches[0]
                 else:
-                    print("⚠️ [DEBUG] No images found, fallback messaging")
-            else:
-                print("⚠️ [DEBUG] No matching product, fallback messaging")
+                    send_whatsapp_message(
+                        from_number,
+                        f"Lo siento, no encontré el producto '{prod_name}'. ¿Puedes verificar el nombre exacto?"
+                    )
+                    return
 
-            send_whatsapp_message(
-                from_number,
-                "Lo siento, no entendí bien cuál producto te interesa. "
-                "¿Podrías escribir el nombre exacto, por favor?"
-            )
+            send_whatsapp_message(from_number, f"¡Claro! 😊 Un momento, buscando imágenes de *{prod_name}*...")
+            producto = next((p for p in productos if p["name"] == prod_name), None)
+            imgs = producto.get("product_images", []) if producto else []
+
+            if not imgs:
+                send_whatsapp_message(
+                    from_number,
+                    f"Lo siento, no tenemos imágenes de *{prod_name}* en este momento."
+                )
+                return
+
+            for img in imgs:
+                url = img.get("url")
+                try:
+                    send_whatsapp_image(from_number, url, caption=prod_name)
+                except Exception as e:
+                    print(f"❌ [ERROR] Error enviando imagen {url}: {e}")
+                    send_whatsapp_message(
+                        from_number,
+                        f"Ups, algo salió mal al enviar una imagen de {prod_name}."
+                    )
             return
 
-
-        # --- 5) Construir contexto rico con variantes e imágenes ---
-        productos = await get_all_products()
+        # 5) Flujo de texto y pedidos
         contexto_lines = []
         for p in productos:
             line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
-            variantes = p.get("product_variants") or []
+            variantes = p.get('product_variants') or []
             if variantes:
                 opts = ", ".join(
                     f"{','.join(f'{k}:{v}' for k, v in v['options'].items())} (stock {v['stock']})"
                     for v in variantes
                 )
                 line += f" | Variantes: {opts}"
-            imgs = p.get("product_images") or []
+            imgs = p.get('product_images') or []
             if imgs:
                 line += f" | Imágenes: {len(imgs)}"
             contexto_lines.append(line)
         contexto = "Catálogo actual:\n" + "\n".join(contexto_lines)
         print("🔍 [DEBUG] Contexto construido:\n", contexto)
 
-        # --- 6) Instrucciones para el modelo ---
         instrucciones = (
-            f"{raw_text}\n\n"
-            f"{contexto}\n\n"
+            f"{raw_text}\n\n{contexto}\n\n"
             "INSTRUCCIONES:\n"
             "1. Si un producto no está disponible, sugiere alternativa.\n"
-            "2. Al ver intención de compra, detalla:\n"
-            "   - Productos, cantidad y precio\n"
-            "   - Subtotal + COP 5.000 envío\n"
-            "   - ¿Deseas algo más?\n"
-            "   - Recomienda 1 producto adicional\n"
-            "   - Si “no”, pide nombre, dirección, teléfono y pago.\n"
-            "3. Usa emojis y tono cercano.\n"
-            "4. Al confirmar, al final incluye este JSON EXACTO:\n"
-            "{\"order_details\":{\"name\":\"NOMBRE\",\"address\":\"DIRECCIÓN\",\"phone\":\"TELÉFONO\",\"payment_method\":\"TIPO_PAGO\",\"products\":[{\"name\":\"NOMBRE\",\"quantity\":1,\"price\":0}],\"total\":0}}\n"
-            "Si el usuario modifica en 5 min, actualiza el pedido.\n"
+            "2. Al ver intención de compra, detalla productos, cantidad, precio, envío COP 5.000, y pregunta si desea algo más.\n"
+            "3. Recomienda un producto adicional.\n"
+            "4. Si el usuario dice 'no', solicita nombre, dirección, teléfono y método de pago.\n"
+            "5. Finaliza con JSON exacto en 'order_details'."
         )
+        user_histories[from_number].append({"role": "user", "text": instrucciones})
+        llm_resp = await ask_gemini_with_history(user_histories[from_number])
+        print("💬 [DEBUG] LLM response for order flow:\n", llm_resp)
 
-        # reescribir última entrada del historial con el prompt completo
-        user_histories[from_number][-1]["text"] = instrucciones
-        gemini_resp = await ask_gemini_with_history(user_histories[from_number])
-        print("💬 [DEBUG] Raw LLM response:", gemini_resp)
-
-        # --- 7) Extraer JSON de pedido y limpiar texto ---
         from app.utils.extractors import extract_order_data
-        order_data, clean_text = extract_order_data(gemini_resp)
-        print("🔍 [DEBUG] Extracted order_data:", order_data)
-        print("🔍 [DEBUG] Clean text:", clean_text)
+        order_data, clean_text = extract_order_data(llm_resp)
+        print("🔍 [DEBUG] order_data:\n", order_data)
+        print("🔍 [DEBUG] clean_text:\n", clean_text)
 
-        # Guardar respuesta limpia
         user_histories[from_number].append({
             "role": "model",
             "text": clean_text,
@@ -178,29 +158,22 @@ async def handle_user_message(body: dict):
         })
         await save_message_to_supabase(from_number, "model", clean_text)
 
-        # --- 8) Recomendaciones si hay productos en el pedido parcial ---
         if order_data and order_data.get("products"):
             recomendaciones = await get_recommended_products(order_data["products"])
-            print("🔍 [DEBUG] Recommended products:", recomendaciones)
             if recomendaciones:
-                texto_rec = "\n".join(
-                    f"- {r['name']}: COP {r['price']}"
-                    for r in recomendaciones
+                texto_rec = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
+                send_whatsapp_message(
+                    from_number,
+                    f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?"
                 )
-                rec_msg = f"🧠 Podrías acompañarlo con:\n{texto_rec}\n¿Te interesa alguno?"
-                send_whatsapp_message(from_number, rec_msg)
 
-        # si no hay order_data, envío la respuesta limpia
         if not order_data:
             send_whatsapp_message(from_number, clean_text)
-
-        # --- 9) Procesar la orden si se obtuvo JSON válido ---
-        if order_data:
+        else:
             result = await process_order(from_number, order_data)
-            print("🔍 [DEBUG] process_order result:", result)
             status = result.get("status")
             if status == "missing":
-                campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
+                campos = "\n".join(f"- {f.replace('_', ' ')}" for f in result.get("fields", []))
                 send_whatsapp_message(from_number, f"📋 Faltan datos:\n{campos}")
             elif status == "created":
                 send_whatsapp_message(from_number, "✅ Pedido confirmado. ¡Gracias! 🎉")
@@ -209,5 +182,5 @@ async def handle_user_message(body: dict):
             else:
                 send_whatsapp_message(from_number, "❌ Error guardando el pedido.")
 
-    except Exception as e:
-        print("❌ [ERROR] Exception in handle_user_message:\n", traceback.format_exc())
+    except Exception:
+        print("❌ [ERROR] En handle_user_message:\n", traceback.format_exc())
