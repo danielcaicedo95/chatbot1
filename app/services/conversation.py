@@ -83,145 +83,151 @@ async def handle_user_message(body: dict):
                 for label in labels:
                     choice_map[label.lower()] = (p, v)
 
-    # ─── 5) BLOQUE MULTIMEDIA SIN PALABRAS CLAVE ───────────────────────────────
-    # 5.1) Armar prompt para Gemini, incluyendo labels e imágenes
-    prompt_obj = {
-        "user_request": raw_text,
-        "catalog": [
-            {
-                "name": p["name"],
-                "variants": [
-                    {
-                        "id": v["id"],
-                        "label": v["options"].get("color") or v["options"].get("name") or ",".join(f"{k}:{v}" for k,v in v["options"].items()),
-                        "images": [
-                            img["url"]
-                            for img in p["product_images"]
-                            if img.get("variant_id") == v["id"]
-                        ]
-                    }
-                    for v in p.get("product_variants", [])
-                ],
-                "images": [
-                    img["url"]
-                    for img in p["product_images"]
-                    if img.get("variant_id") is None
-                ]
-            }
-            for p in productos
-        ],
-        "instructions": [
-            "Devuelve JSON EXACTO sin Markdown:",
-            "  {'want_images': true, 'target': 'variant_label o nombre producto'}",
-            "o si no pide imágenes:",
-            "  {'want_images': false}"
-        ]
-    }
+        # ─── 5) BLOQUE MULTIMEDIA SIN PALABRAS CLAVE ───────────────────────────────
+        # 5.1) Armar prompt para Gemini, incluyendo labels e imágenes
+        prompt_obj = {
+            "user_request": raw_text,
+            "catalog": [
+                {
+                    "name": p["name"],
+                    "variants": [
+                        {
+                            "id": v["id"],
+                            "label": v["options"].get("color") or v["options"].get("name") or ",".join(f"{k}:{v}" for k,v in v["options"].items()),
+                            "images": [
+                                img["url"]
+                                for img in p["product_images"]
+                                if img.get("variant_id") == v["id"]
+                            ]
+                        }
+                        for v in p.get("product_variants", [])
+                    ],
+                    "images": [
+                        img["url"]
+                        for img in p["product_images"]
+                        if img.get("variant_id") is None
+                    ]
+                }
+                for p in productos
+            ],
+            "instructions": [
+                "Devuelve JSON EXACTO sin Markdown:",
+                "  {'want_images': true, 'target': 'variant_label o nombre producto'}",
+                "o si no pide imágenes:",
+                "  {'want_images': false}"
+            ]
+        }
 
-    # 5.2) Filtrar historial para Gemini
-    hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
-    llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
-    llm_resp = await ask_gemini_with_history(llm_input)
-    print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
+        # 5.2) Filtrar historial para Gemini
+        hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
+        llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
+        llm_resp = await ask_gemini_with_history(llm_input)
+        print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
 
-    # 5.3) Parsear JSON de Gemini
-    action = {"want_images": False}
-    m = re.search(r"\{[\s\S]*\}", llm_resp)
-    if m:
-        try:
-            action = json.loads(m.group())
-        except Exception as e:
-            print("⚠️ [DEBUG] JSON parse error:", e)
-    print("🔍 [DEBUG] Parsed multimedia action:", action)
+        # 5.3) Parsear JSON de Gemini
+        action = {"want_images": False}
+        m = re.search(r"\{[\s\S]*\}", llm_resp)
+        if m:
+            try:
+                action = json.loads(m.group())
+            except Exception as e:
+                print("⚠️ [DEBUG] JSON parse error:", e)
+        print("🔍 [DEBUG] Parsed multimedia action:", action)
 
-    # 5.4) Si Gemini indica want_images, procesar
-    if action.get("want_images"):
-        target = action.get("target", "").strip().lower()
-        print(f"🔍 [DEBUG] Gemini target normalized: '{target}'")
+        # 5.4) Si Gemini indica want_images, procesar
+        if action.get("want_images"):
+            target = action.get("target", "").strip().lower()
+            print(f"🔍 [DEBUG] Gemini target normalized: '{target}'")
 
-        prod = var = None
-        # Buscar en catálogo local
-        for p in productos:
-            # 1) Intentar match directo en variantes
-            for v in p.get("product_variants", []):
-                label = (v["options"].get("color") or v["options"].get("name") or
-                        ",".join(f"{k}:{v}" for k,v in v["options"].items())
-                        ).lower()
-                if label == target:
-                    prod, var = p, v
-                    print(f"🔍 [DEBUG] Matched variant by exact label: '{label}'")
-                    break
-            if prod:
-                break
-            # 2) Intentar match por producto
-            if p["name"].lower() == target:
-                prod, var = p, None
-                print(f"🔍 [DEBUG] Matched product by exact name: '{p['name']}'")
-                break
-
-        # 3) Fallbacks con substrings o get_close_matches
-        if not prod:
-            # variantes
+            prod = var = None
+            # Buscar en catálogo local
             for p in productos:
+                # 1) Intentar match directo en variantes
                 for v in p.get("product_variants", []):
-                    label = (v["options"].get("color") or v["options"].get("name") or "").lower()
-                    if label in target:
+                    label = (v["options"].get("color") or v["options"].get("name") or
+                            ",".join(f"{k}:{v}" for k,v in v["options"].items())
+                            ).lower()
+                    if label == target:
                         prod, var = p, v
-                        print(f"🔍 [DEBUG] Substring variant match: '{label}'")
+                        print(f"🔍 [DEBUG] Matched variant by exact label: '{label}'")
                         break
-                if prod: break
-            # productos
+                if prod:
+                    break
+                # 2) Intentar match por producto
+                if p["name"].lower() == target:
+                    prod, var = p, None
+                    print(f"🔍 [DEBUG] Matched product by exact name: '{p['name']}'")
+                    break
+
+            # 3) Fallbacks con substrings o get_close_matches
             if not prod:
+                # variantes
                 for p in productos:
-                    if p["name"].lower() in target:
-                        prod, var = p, None
-                        print(f"🔍 [DEBUG] Substring product match: '{p['name']}'")
-                        break
+                    for v in p.get("product_variants", []):
+                        label = (v["options"].get("color") or v["options"].get("name") or "").lower()
+                        if label in target:
+                            prod, var = p, v
+                            print(f"🔍 [DEBUG] Substring variant match: '{label}'")
+                            break
+                    if prod: break
+                # productos
+                if not prod:
+                    for p in productos:
+                        if p["name"].lower() in target:
+                            prod, var = p, None
+                            print(f"🔍 [DEBUG] Substring product match: '{p['name']}'")
+                            break
 
-        # 4) Si aún no hay match, usar get_close_matches
-        if not prod:
-            keys = []
-            for p in productos:
-                keys.append((p["name"].lower(), (p, None)))
-                for v in p.get("product_variants", []):
-                    lbl = (v["options"].get("color") or v["options"].get("name") or "").lower()
-                    keys.append((lbl, (p, v)))
-            from difflib import get_close_matches
-            choices = [k for k,_ in keys]
-            match = get_close_matches(target, choices, n=1, cutoff=0.5)
-            if match:
-                prod, var = dict(keys)[match[0]]
-                print(f"🔍 [DEBUG] Fallback get_close_matches to: '{match[0]}' -> product {prod['name']}")
+            # 4) Si aún no hay match, usar get_close_matches
+            if not prod:
+                keys = []
+                for p in productos:
+                    keys.append((p["name"].lower(), (p, None)))
+                    for v in p.get("product_variants", []):
+                        lbl = (v["options"].get("color") or v["options"].get("name") or "").lower()
+                        keys.append((lbl, (p, v)))
+                from difflib import get_close_matches
+                choices = [k for k,_ in keys]
+                match = get_close_matches(target, choices, n=1, cutoff=0.5)
+                if match:
+                    prod, var = dict(keys)[match[0]]
+                    print(f"🔍 [DEBUG] Fallback get_close_matches to: '{match[0]}' -> product {prod['name']}")
 
-        # Si no encontramos nada
-        if not prod:
-            send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
+            # Si no encontramos nada
+            if not prod:
+                send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
+                return
+
+            # 5.5) Recopilar URLs: variantes primero, luego generales
+            all_imgs = prod.get("product_images", [])
+            if var:
+                urls = [img["url"] for img in all_imgs if img.get("variant_id") == var["id"]]
+            else:
+                urls = []
+            if not urls:
+                urls = [img["url"] for img in all_imgs if img.get("variant_id") is None]
+
+            print(f"🔍 [DEBUG] URLs seleccionadas: {urls}")
+
+            # 5.6) Enviar labels + URLs
+            display_label = (var and ((var["options"].get("color") or var["options"].get("name")))) or prod["name"]
+            send_whatsapp_message(from_number,
+                f"¡Claro! 😊 Aquí las imágenes de *{display_label}*:")
+            for url in urls:
+                try:
+                    send_whatsapp_image(from_number, url, caption=display_label)
+                    print(f"✅ Enviada imagen: {url}")
+                except Exception as e:
+                    print(f"❌ [ERROR] sending image {url}: {e}")
+                    send_whatsapp_message(from_number, f"No pude enviar la imagen de {display_label}.")
             return
 
-        # 5.5) Recopilar URLs: variantes primero, luego generales
-        all_imgs = prod.get("product_images", [])
-        if var:
-            urls = [img["url"] for img in all_imgs if img.get("variant_id") == var["id"]]
-        else:
-            urls = []
-        if not urls:
-            urls = [img["url"] for img in all_imgs if img.get("variant_id") is None]
 
-        print(f"🔍 [DEBUG] URLs seleccionadas: {urls}")
 
-        # 5.6) Enviar labels + URLs
-        display_label = (var and ((var["options"].get("color") or var["options"].get("name")))) or prod["name"]
-        send_whatsapp_message(from_number,
-            f"¡Claro! 😊 Aquí las imágenes de *{display_label}*:")
-        for url in urls:
-            try:
-                send_whatsapp_image(from_number, url, caption=display_label)
-                print(f"✅ Enviada imagen: {url}")
-            except Exception as e:
-                print(f"❌ [ERROR] sending image {url}: {e}")
-                send_whatsapp_message(from_number, f"No pude enviar la imagen de {display_label}.")
-        return
+        # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
 
+
+        # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
 
 
 
