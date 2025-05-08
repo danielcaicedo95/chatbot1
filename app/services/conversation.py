@@ -37,6 +37,10 @@ async def handle_user_message(body: dict):
             return
         normalized = raw_text.lower()
 
+        # Inicializar contexto del usuario para evitar KeyError
+        user_context.setdefault(from_number, {})
+        ctx = user_context[from_number]
+
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": raw_text,
