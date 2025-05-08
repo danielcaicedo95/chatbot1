@@ -32,7 +32,6 @@ async def handle_user_message(body: dict):
         if not raw_text or not from_number:
             return
 
-        # Guardar mensaje en historial y en Supabase
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": raw_text,
@@ -42,8 +41,7 @@ async def handle_user_message(body: dict):
 
         productos = await get_all_products()
         if not productos:
-            await send_whatsapp_message(from_number, "Lo siento, no hay productos disponibles en este momento.")
-            return
+            return  # No se informa al usuario del error
 
         def extract_labels(obj):
             labels = []
@@ -122,49 +120,47 @@ async def handle_user_message(body: dict):
             return None, None
 
         async def handle_image_request():
-            catalog = build_catalog(productos)
-            prompt_obj = {
-                "user_request": raw_text,
-                "catalog": catalog,
-                "instructions": [
-                    "Devuelve JSON EXACTO sin Markdown:",
-                    "  {'want_images': true, 'target': 'valor variante o nombre producto'}",
-                    "o si no pide imágenes:",
-                    "  {'want_images': false}"
-                ]
-            }
-
-            hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
-            llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
-            llm_resp = await ask_gemini_with_history(llm_input)
-
             try:
+                catalog = build_catalog(productos)
+                prompt_obj = {
+                    "user_request": raw_text,
+                    "catalog": catalog,
+                    "instructions": [
+                        "Devuelve JSON EXACTO sin Markdown:",
+                        "  {'want_images': true, 'target': 'valor variante o nombre producto'}",
+                        "o si no pide imágenes:",
+                        "  {'want_images': false}"
+                    ]
+                }
+
+                hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
+                llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
+                llm_resp = await ask_gemini_with_history(llm_input)
+
                 action = json.loads(re.search(r"\{[\s\S]*\}", llm_resp).group())
+
+                if not action.get("want_images"):
+                    return False
+
+                prod, var = match_target_in_catalog(catalog, productos, action.get("target", ""))
+                if not prod:
+                    return True  # No se informa al usuario que no se encontraron imágenes
+
+                urls = var["images"] if var else [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
+                if not urls:
+                    return True  # No se informa al usuario que no se encontraron imágenes
+
+                display = var["label"] if var else prod["name"]
+                await send_whatsapp_message(from_number, f"Aquí las imágenes de *{display}*:")
+                for u in urls:
+                    try:
+                        await send_whatsapp_image(from_number, u, caption=display)
+                    except Exception:
+                        print(f"❌ Error enviando imagen {u}")
+                return True
             except Exception:
+                print("⚠️ Error en handle_image_request:\n", traceback.format_exc())
                 return False
-
-            if not action.get("want_images"):
-                return False
-
-            prod, var = match_target_in_catalog(catalog, productos, action.get("target", ""))
-            if not prod:
-                await send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
-                return True
-
-            urls = var["images"] if var else [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
-            if not urls:
-                await send_whatsapp_message(from_number, f"No encontré imágenes para {prod['name']}.")
-                return True
-
-            display = var["label"] if var else prod["name"]
-            await send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí las imágenes de *{display}*:")
-            for u in urls:
-                try:
-                    await send_whatsapp_image(from_number, u, caption=display)
-                except Exception as e:
-                    print(f"❌ Error enviando imagen {u}: {e}")
-                    await send_whatsapp_message(from_number, f"No pude enviar una imagen de {display}.")
-            return True
 
         handled = await handle_image_request()
         if handled:
@@ -237,12 +233,8 @@ async def handle_user_message(body: dict):
             elif status == "updated":
                 await send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
             else:
-                await send_whatsapp_message(from_number, "❌ Error guardando el pedido.")
+                print("⚠️ Error inesperado en process_order:", result)
 
     except Exception:
         print("❌ [ERROR en handle_user_message]:\n", traceback.format_exc())
-        if 'from_number' in locals():
-            try:
-                await send_whatsapp_message(from_number, "❌ Ocurrió un error. Intenta de nuevo.")
-            except Exception:
-                print("⚠️ No se pudo enviar mensaje de error al usuario.")
+        # Ya no se informa al usuario si algo falla internamente
