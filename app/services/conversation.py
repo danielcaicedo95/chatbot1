@@ -1,15 +1,16 @@
+# app/services/conversation.py
+
 from datetime import datetime
 import json
 import re
 import traceback
 
 from difflib import get_close_matches
-from app.utils.memory import user_histories, user_context
+from app.utils.memory import user_histories, user_pending_data, user_context
 from app.clients.gemini import ask_gemini_with_history
-from app.clients.whatsapp import (
-    send_whatsapp_message,
-    send_whatsapp_image
-)
+from app.clients.whatsapp import send_whatsapp_message, send_whatsapp_image
+
+# Indicador de “escribiendo…” (stub si no existe)
 try:
     from app.clients.whatsapp import send_typing_indicator
 except ImportError:
@@ -18,11 +19,16 @@ except ImportError:
 
 from app.services.supabase import save_message_to_supabase
 from app.services.products import get_all_products
+from app.services.orders import process_order
+from app.services.products import get_recommended_products
+from app.utils.extractors import extract_order_data
 
+# Campos obligatorios para completar el formulario
 REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
 async def handle_user_message(body: dict):
     try:
+        # ─── 1) Extraer payload ─────────────────────────────────────────────────
         entry = body.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
         messages = changes.get("value", {}).get("messages", [])
@@ -37,7 +43,7 @@ async def handle_user_message(body: dict):
             return
         normalized = raw_text.lower()
 
-        # Inicializar contexto del usuario para evitar KeyError
+        # ─── 2) Inicializar memoria y guardar histórico ─────────────────────────
         user_context.setdefault(from_number, {})
         ctx = user_context[from_number]
 
@@ -47,124 +53,153 @@ async def handle_user_message(body: dict):
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "user", raw_text)
-        # --- Manejo de llenado de formulario de pedido ---
-        ctx = user_context[from_number]
-        from app.utils.memory import user_pending_data
+
+        # ─── 3) Si estamos en medio del formulario, procesar campo ───────────────
         if ctx.get("awaiting_fields"):
             field = ctx["awaiting_fields"].pop(0)
             pending = user_pending_data.get(from_number, {})
             pending[field] = raw_text
             user_pending_data[from_number] = pending
+
             if ctx["awaiting_fields"]:
                 next_field = ctx["awaiting_fields"][0]
-                await send_whatsapp_message(from_number, f"Por favor, proporciona tu {next_field.replace('_',' ')}.")
+                await send_whatsapp_message(
+                    from_number,
+                    f"Por favor, indícame tu {next_field.replace('_',' ')}."
+                )
             else:
-                from app.services.orders import process_order
+                # Todos los campos recibidos: guardar orden en Supabase
                 result = await process_order(from_number, pending)
-                if result.get("status") in ("created", "updated"):
-                    await send_whatsapp_message(from_number, "✅ Pedido procesado exitosamente. ¡Gracias! 🎉")
+                status = result.get("status")
+                if status in ("created", "updated"):
+                    await send_whatsapp_message(
+                        from_number,
+                        "✅ Tu pedido ha sido procesado correctamente. ¡Gracias! 🎉"
+                    )
                 else:
-                    await send_whatsapp_message(from_number, "❌ Error procesando el pedido.")
+                    await send_whatsapp_message(
+                        from_number,
+                        "❌ Hubo un error al procesar tu pedido. Por favor intenta de nuevo."
+                    )
                 ctx.pop("awaiting_fields")
             return
-        user_context.setdefault(from_number, {})
 
+        # ─── 4) Simular “escribiendo…” ───────────────────────────────────────────
         await send_typing_indicator(from_number)
 
+        # ─── 5) Cargar catálogo y formatear precios/stock ────────────────────────
         productos = await get_all_products()
         for p in productos:
-            p_price = p.get("price", 0)
-            p_stock = p.get("stock", 0)
-            p["price_numeric"] = p_price
-            p["price"] = f"COP {p_price:,}" if p_price > 0 else "Consultar"
-            p["stock"] = p_stock if p_stock > 0 else "Agotado"
+            price = p.get("price", 0) or 0
+            stock = p.get("stock", 0) or 0
+            p["price_numeric"] = price
+            p["price"] = f"COP {price:,}" if price > 0 else "Consultar"
+            p["stock"] = stock if stock > 0 else "Agotado"
             for v in p.get("product_variants", []):
-                v_price = v.get("price", 0)
-                v_stock = v.get("stock", 0)
+                v_price = v.get("price", 0) or 0
+                v_stock = v.get("stock", 0) or 0
                 v["price"] = f"COP {v_price:,}" if v_price > 0 else "Consultar"
                 v["stock"] = v_stock if v_stock > 0 else "Agotado"
 
+        # ─── 6) Bloque multimedia: solo si pide “foto/imagen/muestra/ver” ───────
         if re.search(r"\b(foto|imagen|muestra|ver)\b", normalized):
-            last = user_context[from_number].get("last_selection")
-            selected = None
-            if last:
-                selected = last
-            else:
+            # Determinar selección anterior o por nombre/variant
+            selected = ctx.get("last_selection")
+            if not selected:
                 for p in productos:
                     if p["name"].lower() in normalized:
                         selected = (p, None)
                         break
                     for v in p.get("product_variants", []):
-                        if any(str(val).lower() in normalized for val in v.get("options", {}).values()):
+                        if any(str(val).lower() in normalized for val in v["options"].values()):
                             selected = (p, v)
                             break
                     if selected:
                         break
+
             if not selected:
-                await send_whatsapp_message(from_number, "Lo siento, no encontré esa imagen. ¿De qué producto hablamos? 😊")
+                await send_whatsapp_message(
+                    from_number,
+                    "Lo siento, no encontré esa imagen. ¿De qué producto hablamos? 😊"
+                )
                 return
+
             prod, var = selected
-            user_context[from_number]["last_selection"] = selected
+            ctx["last_selection"] = selected
+
+            # Recopilar URLs (primero variante, luego principales)
             urls = []
             if var:
-                urls = [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") == var["id"]]
+                urls = [
+                    img["url"] for img in prod.get("product_images", [])
+                    if img.get("variant_id") == var["id"]
+                ]
             if not urls:
-                urls = [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
+                urls = [
+                    img["url"] for img in prod.get("product_images", [])
+                    if img.get("variant_id") is None
+                ]
             if not urls:
-                await send_whatsapp_message(from_number, "Lo siento, no tengo imágenes disponibles de eso.")
+                await send_whatsapp_message(
+                    from_number,
+                    "Lo siento, no tengo imágenes disponibles de eso."
+                )
                 return
-            for url in urls:
-                await send_whatsapp_image(from_number, url)
+
+            # Enviar solo la primera imagen
+            await send_typing_indicator(from_number)
+            await send_whatsapp_image(from_number, urls[0])
             return
 
+        # ─── 7) Construir contexto textual para el LLM ──────────────────────────
         contexto_lines = []
         for p in productos:
             line = f"- {p['name']}: {p['price']} (stock {p['stock']})"
             variants = p.get("product_variants", [])
             if variants:
-                opts = []
-                for v in variants:
-                    label = ",".join(f"{k}:{v2}" for k, v2 in v["options"].items())
-                    opts.append(f"{label} (stock {v['stock']}, {v['price']})")
+                opts = [
+                    f"{','.join(f'{k}:{v2}' for k,v2 in v['options'].items())} "
+                    f"(stock {v['stock']}, {v['price']})"
+                    for v in variants
+                ]
                 line += " | Variantes: " + "; ".join(opts)
             contexto_lines.append(line)
         contexto = "Catálogo:\n" + "\n".join(contexto_lines)
 
+        # ─── 8) Llamada a Gemini para flujo de venta ─────────────────────────────
         await send_typing_indicator(from_number)
         instrucciones = (
             f"Usuario: {raw_text}\n{contexto}\n"
-            "Actúa como un vendedor experto y amable.\n"
-            "- Sé conversacional y humano, sin saludos genéricos.\n"
-            "- Si no hay stock, dilo y ofrece alternativa persuasiva.\n"
-            "- Si el usuario muestra intención de compra, calcula subtotal + COP 5.000 de envío y pregunta si desea algo más.\n"
+            "Actúa como un vendedor experto, cercano y sin saludos genéricos.\n"
+            "- Si no hay stock, dilo y sugiere alternativa persuasiva.\n"
+            "- Si muestra intención de compra, calcula subtotal + COP 5.000 de envío y pregunta si desea algo más.\n"
             "- Sugiere un producto adicional basado en su carrito.\n"
             "- Cuando confirme, pide: nombre, dirección, teléfono y método de pago.\n"
             "- No envíes JSON al usuario."
         )
-        hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
-        llm_resp = await ask_gemini_with_history(hist + [{"role": "user", "text": instrucciones}])
+        hist = [m for m in user_histories[from_number] if m["role"] in ("user","model")]
+        llm_resp = await ask_gemini_with_history(hist + [{"role":"user","text":instrucciones}])
 
+        # ─── 9) Enviar respuesta humana sin JSON ───────────────────────────────
         clean_text = re.sub(r"\{.*?\}", "", llm_resp, flags=re.DOTALL).strip()
-        user_histories[from_number].append({"role": "model", "text": clean_text, "time": datetime.utcnow().isoformat()})
+        user_histories[from_number].append({
+            "role":"model","text":clean_text,"time":datetime.utcnow().isoformat()
+        })
         await save_message_to_supabase(from_number, "model", clean_text)
         await send_typing_indicator(from_number)
         await send_whatsapp_message(from_number, clean_text)
 
-        from app.utils.extractors import extract_order_data
-        from app.services.orders import process_order
-        from app.services.products import get_recommended_products
-
+        # ─── 10) Extraer intención de pedido y resumir ─────────────────────────
         order_data, _ = extract_order_data(llm_resp)
         if order_data and order_data.get("products"):
+            # Calcular totales
             lineas = []
             subtotal = 0
             for item in order_data["products"]:
-                nombre = item.get("name")
-                cantidad = int(item.get("quantity", 1))
-                producto = next((p for p in productos if p["name"] == nombre), None)
-                if not producto:
-                    continue
-                precio_unit = producto.get("price_numeric", 0)
+                nombre = item["name"]
+                cantidad = int(item.get("quantity",1))
+                prod = next((p for p in productos if p["name"]==nombre), None)
+                precio_unit = prod["price_numeric"] if prod else 0
                 total_item = precio_unit * cantidad
                 subtotal += total_item
                 lineas.append(f"{cantidad} x {nombre} (COP {precio_unit:,}) = COP {total_item:,}")
@@ -173,32 +208,21 @@ async def handle_user_message(body: dict):
             total = subtotal + 5000
             order_data["total"] = total
 
-            resumen = "\n".join(lineas)
+            # Enviar resumen
             await send_whatsapp_message(
                 from_number,
-                f"Aquí el resumen de tu pedido:\n{resumen}\nSubtotal: COP {subtotal:,}\nEnvío: COP 5,000\nTotal: COP {total:,}\n¿Confirmas? 😊"
+                "Aquí el resumen de tu pedido:\n"
+                f"{'\n'.join(lineas)}\n"
+                f"Subtotal: COP {subtotal:,}\n"
+                "Envío: COP 5,000\n"
+                f"Total: COP {total:,}\n"
+                "¿Confirmas? 😊"
             )
 
-            recomendaciones = await get_recommended_products(order_data["products"])
-            if recomendaciones:
-                texto_rec = "\n".join(f"- {r['name']}: COP {int(r['price']):,}" for r in recomendaciones)
-                await send_whatsapp_message(
-                    from_number,
-                    f"🧠 También te podría interesar:\n{texto_rec}\n¿Qué opinas? 😊"
-                )
-
-            result = await process_order(from_number, order_data)
-            status = result.get("status")
-            if status == "missing":
-                faltantes = result.get("fields", [])
-                campos = "\n".join(f"- {f.replace('_',' ')}" for f in faltantes)
-                await send_whatsapp_message(from_number, f"📋 Falta información:\n{campos}")
-            elif status == "created":
-                await send_whatsapp_message(from_number, "✅ Tu pedido ha sido confirmado. ¡Gracias! 🎉")
-            elif status == "updated":
-                await send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
-            else:
-                await send_whatsapp_message(from_number, "❌ Hubo un error procesando tu pedido.")
+            # Inicializar formulario si faltan datos
+            user_pending_data[from_number] = order_data
+            ctx["awaiting_fields"] = REQUIRED_FIELDS.copy()
         return
+
     except Exception:
         traceback.print_exc()
