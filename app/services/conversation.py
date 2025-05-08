@@ -19,20 +19,18 @@ REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
 async def handle_user_message(body: dict):
     try:
-        # ─── 1) VALIDAR Y EXTRAER MENSAJE ─────────────────────────────────────────
-        entry     = body.get("entry", [{}])[0]
-        change    = entry.get("changes", [{}])[0]
-        messages  = change.get("value", {}).get("messages") or []
+        entry = body.get("entry", [{}])[0]
+        change = entry.get("changes", [{}])[0]
+        messages = change.get("value", {}).get("messages") or []
         if not messages:
             return
 
-        msg        = messages[0]
-        raw_text   = msg.get("text", {}).get("body", "").strip()
-        from_number= msg.get("from")
+        msg = messages[0]
+        raw_text = msg.get("text", {}).get("body", "").strip()
+        from_number = msg.get("from")
         if not raw_text or not from_number:
             return
 
-        # ─── 2) GUARDAR HISTORIAL Y SUPABASE ─────────────────────────────────────
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": raw_text,
@@ -40,13 +38,11 @@ async def handle_user_message(body: dict):
         })
         await save_message_to_supabase(from_number, "user", raw_text)
 
-        # ─── 3) CARGAR CATÁLOGO ─────────────────────────────────────────────────
         productos = await get_all_products()
         if not productos:
             await send_whatsapp_message(from_number, "Lo siento, no tenemos productos disponibles ahora.")
             return
 
-        # Helpers de catálogo
         def extract_labels(o):
             labels = []
             if isinstance(o, dict):
@@ -63,11 +59,12 @@ async def handle_user_message(body: dict):
                 variants = []
                 for v in p.get("product_variants", []):
                     opts = v.get("options", {})
-                    if not opts: continue
+                    if not opts:
+                        continue
                     key, val = next(iter(opts.items()))
                     value = str(val).lower()
                     label = v.get("variant_label") or f"{key}:{value}"
-                    imgs = [img["url"] for img in p.get("product_images", []) if img.get("variant_id")==v["id"]]
+                    imgs = [img["url"] for img in p.get("product_images", []) if img.get("variant_id") == v["id"]]
                     variants.append({
                         "id": v["id"],
                         "value": value,
@@ -88,21 +85,17 @@ async def handle_user_message(body: dict):
 
         def match_target(catalog, target):
             t = target.strip().lower()
-            # exact variant
             for e in catalog:
                 for v in e["variants"]:
                     if v["value"] == t:
                         return e, v
-            # exact product
             for e in catalog:
                 if e["name"].lower() == t:
                     return e, None
-            # substring variant
             for e in catalog:
                 for v in e["variants"]:
                     if v["value"] in t:
                         return e, v
-            # close match
             choices = [v["value"] for e in catalog for v in e["variants"]] + [e["name"].lower() for e in catalog]
             best = get_close_matches(t, choices, n=1, cutoff=0.5)
             if best:
@@ -115,7 +108,6 @@ async def handle_user_message(body: dict):
                         return e, None
             return None, None
 
-        # ─── 4) BLOQUE MULTIMEDIA ─────────────────────────────────────────────────
         catalog = build_catalog(productos)
         prompt = {
             "user_request": raw_text,
@@ -127,17 +119,19 @@ async def handle_user_message(body: dict):
                 "  {'want_images': false}"
             ]
         }
+
         hist = user_histories[from_number][-10:]
-        hist.append({"role":"user", "text": json.dumps(prompt, ensure_ascii=False)})
+        hist.append({"role": "user", "text": json.dumps(prompt, ensure_ascii=False)})
         llm_mult = await ask_gemini_with_history(hist)
 
         try:
             action = json.loads(re.search(r"\{[\s\S]*\}", llm_mult).group())
-        except:
+        except Exception as e:
+            print("⚠️ No se pudo interpretar JSON del modelo:", e)
             action = {"want_images": False}
 
         if action.get("want_images"):
-            prod_sel, var_sel = match_target(catalog, action.get("target",""))
+            prod_sel, var_sel = match_target(catalog, action.get("target", ""))
             if not prod_sel:
                 await send_whatsapp_message(from_number, "No encontré ese producto para mostrar imágenes.")
                 return
@@ -153,8 +147,6 @@ async def handle_user_message(body: dict):
                 await send_whatsapp_image(from_number, url, caption=title)
             return
 
-        # ─── 5) FLUJO DE PEDIDOS ─────────────────────────────────────────────────
-        # Construir contexto textual
         def build_order_context(cat):
             lines = []
             for e in cat:
@@ -185,34 +177,31 @@ async def handle_user_message(body: dict):
         )
 
         hist2 = user_histories[from_number][-10:]
-        hist2.append({"role":"user", "text": instrucciones})
+        hist2.append({"role": "user", "text": instrucciones})
         llm_order = await ask_gemini_with_history(hist2)
 
-        # Extraer pedido
         order_data, model_text = extract_order_data(llm_order)
 
         user_histories[from_number].append({
-            "role":"model",
+            "role": "model",
             "text": model_text,
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "model", model_text)
 
-        # Sugerencias
         if order_data.get("products"):
             recs = await get_recommended_products(order_data["products"])
             if recs:
                 text_recs = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recs)
                 await send_whatsapp_message(from_number, f"🧠 Tal vez te interese:\n{text_recs}\n¿Te animas?")
 
-        # Procesar o mostrar fallback
         if not order_data.get("products"):
             await send_whatsapp_message(from_number, model_text)
         else:
             result = await process_order(from_number, order_data)
             status = result.get("status")
             if status == "missing":
-                campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
+                campos = "\n".join(f"- {f.replace('_', ' ')}" for f in result.get("fields", []))
                 await send_whatsapp_message(from_number, f"📋 Faltan datos:\n{campos}")
             elif status == "created":
                 await send_whatsapp_message(from_number, "✅ Pedido recibido. ¡Gracias! 🎉")
@@ -224,4 +213,4 @@ async def handle_user_message(body: dict):
     except Exception:
         print("❌ [ERROR] en handle_user_message:\n", traceback.format_exc())
         if 'from_number' in locals():
-            await send_whatsapp_message(from_number, "❌ Algo salió mal. Intenta de nuevo más tarde.")
+            await send_whatsapp_message(from_number, "❌ Ocurrió un error inesperado. Intenta más tarde.")
