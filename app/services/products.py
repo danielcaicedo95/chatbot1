@@ -18,7 +18,7 @@ except ImportError:
         return
 
 from app.services.supabase import save_message_to_supabase
-from app.services.products import get_all_products, get_recommended_products
+
 from app.services.orders import process_order
 
 # Campos obligatorios para confirmar pedido
@@ -51,7 +51,9 @@ async def handle_user_message(body: dict):
         # 3) Simular "escribiendo..."
         await send_typing_indicator(from_number)
 
-        # 4) Cargar catálogo y sanitizar precios/stock
+                # 4) Importar servicios de productos para evitar circular imports
+        from app.services.products import get_all_products, get_recommended_products
+        # Cargar catálogo y sanitizar precios/stock
         productos = await get_all_products()
         for p in productos:
             if p.get("price", 0) <= 0:
