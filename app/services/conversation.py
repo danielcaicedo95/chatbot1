@@ -43,6 +43,26 @@ async def handle_user_message(body: dict):
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "user", raw_text)
+        # --- Manejo de llenado de formulario de pedido ---
+        ctx = user_context[from_number]
+        from app.utils.memory import user_pending_data
+        if ctx.get("awaiting_fields"):
+            field = ctx["awaiting_fields"].pop(0)
+            pending = user_pending_data.get(from_number, {})
+            pending[field] = raw_text
+            user_pending_data[from_number] = pending
+            if ctx["awaiting_fields"]:
+                next_field = ctx["awaiting_fields"][0]
+                await send_whatsapp_message(from_number, f"Por favor, proporciona tu {next_field.replace('_',' ')}.")
+            else:
+                from app.services.orders import process_order
+                result = await process_order(from_number, pending)
+                if result.get("status") in ("created", "updated"):
+                    await send_whatsapp_message(from_number, "✅ Pedido procesado exitosamente. ¡Gracias! 🎉")
+                else:
+                    await send_whatsapp_message(from_number, "❌ Error procesando el pedido.")
+                ctx.pop("awaiting_fields")
+            return
         user_context.setdefault(from_number, {})
 
         await send_typing_indicator(from_number)
