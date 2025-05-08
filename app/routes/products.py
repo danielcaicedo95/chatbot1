@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
-from typing import List, Optional, Union
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from typing import List, Optional
 import json
 import io
 import csv
@@ -13,11 +13,9 @@ from app.services.products import (
     delete_product
 )
 from app.services.supabase import upload_image_to_supabase_storage
-from fastapi import File, UploadFile
 
 router = APIRouter(prefix="/products", tags=["products"])
 
-# --- Existing CRUD Endpoints ---
 @router.get("/", summary="List all products with variants and images")
 async def list_products():
     try:
@@ -43,14 +41,14 @@ async def add_product(
     description: Optional[str] = Form(None),
     price: float = Form(...),
     stock: int = Form(...),
-    variants: List[str] = Form(default=[]),  # JSON strings
+    variants: List[str] = Form(default=[]),  # JSON strings: {"options": {...}, "price":x, "stock":y}
     images: List[UploadFile] = File(default=[]),
 ):
-    # Validation
+    # Validate main stock/price
     if price < 0 or stock < 0:
         raise HTTPException(status_code=400, detail="`price` and `stock` must be non-negative")
 
-    # Upload images
+    # Upload images -> URLs
     image_urls: List[str] = []
     for img in images:
         data = await img.read()
@@ -59,7 +57,7 @@ async def add_product(
             raise HTTPException(status_code=500, detail=f"Image upload failed: {url_or_err}")
         image_urls.append(url_or_err)
 
-    # Create product
+    # Create product record
     new_product = {"name": name, "description": description, "price": price, "stock": stock}
     try:
         created = await create_product(new_product)
@@ -67,7 +65,7 @@ async def add_product(
         raise HTTPException(status_code=500, detail=f"Error creating product: {e}")
     prod_id = created.get("id")
 
-    # Base images
+    # Save general images
     for url in image_urls:
         await create_variant_image({
             "product_id": prod_id,
@@ -76,22 +74,49 @@ async def add_product(
             "url": url,
         })
 
-    # Variants
+    # Process variants (allow per-variant price/stock)
     for idx, variant_str in enumerate(variants):
         try:
-            options = json.loads(variant_str)
-        except:
-            options = {"option": variant_str}
+            parsed = json.loads(variant_str)
+        except json.JSONDecodeError:
+            # legacy: single option value
+            parsed = {"options": {"option": variant_str}}
+
+        # Determine options and overrides
+        if isinstance(parsed, dict) and "options" in parsed:
+            options = parsed.get("options") or {}
+            variant_price = float(parsed.get("price", price))
+            variant_stock = int(parsed.get("stock", stock))
+        else:
+            options = parsed
+            variant_price = price
+            variant_stock = stock
+
+        # Build human label
         variant_label = ",".join(f"{k}:{v}" for k, v in options.items())
-        var = await create_variant({"product_id": prod_id, "options": options, "price": price, "stock": stock})
+
+        # Create variant record
+        try:
+            var = await create_variant({
+                "product_id": prod_id,
+                "options": options,
+                "price": variant_price,
+                "stock": variant_stock,
+            })
+        except Exception as e:
+            print(f"Warning: failed to create variant: {e}")
+            continue
         var_id = var.get("id")
-        if idx < len(image_urls):
+
+        # Optionally attach one of the uploaded images to this variant
+        if idx < len(image_urls) and var_id:
             await create_variant_image({
                 "product_id": prod_id,
                 "variant_id": var_id,
                 "variant_label": variant_label,
                 "url": image_urls[idx],
             })
+
     return created
 
 @router.delete("/{product_id}", summary="Eliminar un producto completo")
@@ -106,16 +131,11 @@ async def remove_product(product_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error eliminando producto: {e}")
 
-# --- New Bulk Import Endpoint ---
 @router.post("/bulk", summary="Import products in bulk from CSV or JSON")
 async def bulk_import(
     file: UploadFile = File(...),
     format: str = Form(...),  # 'csv' or 'json'
 ):
-    """
-    Espera un archivo CSV con columnas: name,description,price,stock,variants (JSON),image_urls (JSON array)
-    O un JSON array con objetos similares.
-    """
     content = await file.read()
     items = []
     try:
@@ -133,27 +153,53 @@ async def bulk_import(
 
     results = []
     for item in items:
-        # Parse fields
+        # Parse global fields
         name = item.get('name')
         description = item.get('description')
-        price = float(item.get('price', 0))
-        stock = int(item.get('stock', 0))
-        variants = item.get('variants') or '[]'
+        base_price = float(item.get('price', 0))
+        base_stock = int(item.get('stock', 0))
+        variants_json = item.get('variants') or '[]'
         image_urls = json.loads(item.get('image_urls', '[]'))
 
         # Create product
-        prod = await create_product({"name": name, "description": description, "price": price, "stock": stock})
+        prod = await create_product({
+            "name": name,
+            "description": description,
+            "price": base_price,
+            "stock": base_stock
+        })
         pid = prod.get('id')
+
         # Base images
         for url in image_urls:
-            await create_variant_image({"product_id": pid, "variant_id": None, "variant_label": None, "url": url})
-        # Variants
-        for vstr in json.loads(variants):
-            options = vstr if isinstance(vstr, dict) else {"option": vstr}
-            label = ",".join(f"{k}:{v}" for k,v in options.items())
-            var = await create_variant({"product_id": pid, "options": options, "price": price, "stock": stock})
-            vid = var.get('id')
-            # no additional images by default
+            await create_variant_image({
+                "product_id": pid,
+                "variant_id": None,
+                "variant_label": None,
+                "url": url
+            })
+
+        # Variants with overrides
+        for v in json.loads(variants_json):
+            if isinstance(v, dict) and 'options' in v:
+                options = v.get('options') or {}
+                variant_price = float(v.get('price', base_price))
+                variant_stock = int(v.get('stock', base_stock))
+            else:
+                options = v if isinstance(v, dict) else {"option": v}
+                variant_price = base_price
+                variant_stock = base_stock
+
+            variant_label = ",".join(f"{k}:{v}" for k, v in options.items())
+            var = await create_variant({
+                "product_id": pid,
+                "options": options,
+                "price": variant_price,
+                "stock": variant_stock
+            })
+            var_id = var.get('id')
+            # no default images for bulk import variants
+
         results.append({"product_id": pid, "name": name})
 
     return {"imported": results}
