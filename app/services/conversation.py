@@ -45,119 +45,188 @@ async def handle_user_message(body: dict):
 
         # ─── 3) Saludo inicial ───────────────────────────────────────────────────
         # Contamos solo mensajes user/model para evitar contar context
-        count_conv = len([m for m in user_histories[from_number] if m["role"] in ("user","model")])
-        if count_conv == 1:
-            saludo = "¡Hola! 👋 Soy Lucas, tu asistente de Licores El Roble. ¿En qué puedo ayudarte hoy?"
-            user_histories[from_number].append({
-                "role": "model",
-                "text": saludo,
-                "time": datetime.utcnow().isoformat()
-            })
-            await save_message_to_supabase(from_number, "model", saludo)
-            send_whatsapp_message(from_number, saludo)
-            return
+        # count_conv = len([m for m in user_histories[from_number] if m["role"] in ("user","model")])
+        # if count_conv == 1:
+        #     saludo = "¡Hola! 👋 Soy Lucas, tu asistente de Licores El Roble. ¿En qué puedo ayudarte hoy?"
+        #     user_histories[from_number].append({
+        #         "role": "model",
+        #         "text": saludo,
+        #         "time": datetime.utcnow().isoformat()
+        #     })
+        #     await save_message_to_supabase(from_number, "model", saludo)
+        #     send_whatsapp_message(from_number, saludo)
+        #     return
 
-        # ─── 4) Cargar catálogo y preparar choice_map ─────────────────────────────
+               # ─── 4) Cargar catálogo y preparar choice_map ─────────────────────────────
         productos = await get_all_products()
+
         # Mapa lowercase -> (producto_obj, variante_obj or None)
         choice_map = {}
+
+        # Función recursiva para extraer solo strings desde cualquier estructura
+        def extract_labels(o, labels):
+            if isinstance(o, dict):
+                for v in o.values():
+                    extract_labels(v, labels)
+            elif isinstance(o, list):
+                for v in o:
+                    extract_labels(v, labels)
+            elif isinstance(o, str):
+                labels.append(o)
+
+        # Llenar el mapa con nombres de producto y etiquetas de variante
         for p in productos:
             choice_map[p["name"].lower()] = (p, None)
             for v in p.get("product_variants", []):
-                for val in v.get("options", {}).values():
-                    choice_map[str(val).lower()] = (p, v)
+                labels = []
+                extract_labels(v.get("options", {}), labels)
+                for label in labels:
+                    choice_map[label.lower()] = (p, v)
 
-        # ─── 5) BLOQUE MULTIMEDIA SIN PALABRAS CLAVE ───────────────────────────────
-        # 5.1) Armar prompt para Gemini
-        prompt_obj = {
-            "user_request": raw_text,
-            "catalog": [
-                {
-                    "name": p["name"],
-                    "variants": [v["options"] for v in p.get("product_variants", [])]
-                } for p in productos
-            ],
-            "instructions": [
-                "Devuelve JSON EXACTO sin Markdown:",
-                "  {'want_images': true, 'target': 'nombre producto o variante'}",
-                "o si no pide imágenes:",
-                "  {'want_images': false}"
-            ]
-        }
-        # 5.2) Filtrar historial (solo user/model) para Gemini
-        hist = [m for m in user_histories[from_number] if m["role"] in ("user","model")]
-        llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
-        llm_resp = await ask_gemini_with_history(llm_input)
-        print("🔍 [DEBUG] Raw LLM multimedia response:\n", llm_resp)
+    # ─── 5) BLOQUE MULTIMEDIA SIN PALABRAS CLAVE ───────────────────────────────
+    # 5.1) Armar prompt para Gemini, incluyendo labels e imágenes
+    prompt_obj = {
+        "user_request": raw_text,
+        "catalog": [
+            {
+                "name": p["name"],
+                "variants": [
+                    {
+                        "id": v["id"],
+                        "label": v["options"].get("color") or v["options"].get("name") or ",".join(f"{k}:{v}" for k,v in v["options"].items()),
+                        "images": [
+                            img["url"]
+                            for img in p["product_images"]
+                            if img.get("variant_id") == v["id"]
+                        ]
+                    }
+                    for v in p.get("product_variants", [])
+                ],
+                "images": [
+                    img["url"]
+                    for img in p["product_images"]
+                    if img.get("variant_id") is None
+                ]
+            }
+            for p in productos
+        ],
+        "instructions": [
+            "Devuelve JSON EXACTO sin Markdown:",
+            "  {'want_images': true, 'target': 'variant_label o nombre producto'}",
+            "o si no pide imágenes:",
+            "  {'want_images': false}"
+        ]
+    }
 
-        # 5.3) Parsear JSON de Gemini
-        action = {"want_images": False}
-        json_match = re.search(r"\{[\s\S]*\}", llm_resp)
-        if json_match:
-            try:
-                action = json.loads(json_match.group())
-            except Exception as e:
-                print("⚠️ [DEBUG] JSON parse error:", e)
-        print("🔍 [DEBUG] Parsed multimedia action:", action)
+    # 5.2) Filtrar historial para Gemini
+    hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
+    llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
+    llm_resp = await ask_gemini_with_history(llm_input)
+    print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
 
-        # 5.4) Si Gemini indica want_images, procesar
-        if action.get("want_images"):
-            target = action.get("target", "").strip().lower()
+    # 5.3) Parsear JSON de Gemini
+    action = {"want_images": False}
+    m = re.search(r"\{[\s\S]*\}", llm_resp)
+    if m:
+        try:
+            action = json.loads(m.group())
+        except Exception as e:
+            print("⚠️ [DEBUG] JSON parse error:", e)
+    print("🔍 [DEBUG] Parsed multimedia action:", action)
 
-            # Si no vino target, hacemos fallback a la última selección guardada
-            if not target:
-                for e in reversed(user_histories[from_number]):
-                    if e.get("role") == "context":
-                        target = e["last_image_selection"]["product_name"].lower()
+    # 5.4) Si Gemini indica want_images, procesar
+    if action.get("want_images"):
+        target = action.get("target", "").strip().lower()
+        print(f"🔍 [DEBUG] Gemini target normalized: '{target}'")
+
+        prod = var = None
+        # Buscar en catálogo local
+        for p in productos:
+            # 1) Intentar match directo en variantes
+            for v in p.get("product_variants", []):
+                label = (v["options"].get("color") or v["options"].get("name") or
+                        ",".join(f"{k}:{v}" for k,v in v["options"].items())
+                        ).lower()
+                if label == target:
+                    prod, var = p, v
+                    print(f"🔍 [DEBUG] Matched variant by exact label: '{label}'")
+                    break
+            if prod:
+                break
+            # 2) Intentar match por producto
+            if p["name"].lower() == target:
+                prod, var = p, None
+                print(f"🔍 [DEBUG] Matched product by exact name: '{p['name']}'")
+                break
+
+        # 3) Fallbacks con substrings o get_close_matches
+        if not prod:
+            # variantes
+            for p in productos:
+                for v in p.get("product_variants", []):
+                    label = (v["options"].get("color") or v["options"].get("name") or "").lower()
+                    if label in target:
+                        prod, var = p, v
+                        print(f"🔍 [DEBUG] Substring variant match: '{label}'")
+                        break
+                if prod: break
+            # productos
+            if not prod:
+                for p in productos:
+                    if p["name"].lower() in target:
+                        prod, var = p, None
+                        print(f"🔍 [DEBUG] Substring product match: '{p['name']}'")
                         break
 
-            # Match insensible a mayúsculas
-            match = get_close_matches(target, list(choice_map.keys()), n=1, cutoff=0.4)
+        # 4) Si aún no hay match, usar get_close_matches
+        if not prod:
+            keys = []
+            for p in productos:
+                keys.append((p["name"].lower(), (p, None)))
+                for v in p.get("product_variants", []):
+                    lbl = (v["options"].get("color") or v["options"].get("name") or "").lower()
+                    keys.append((lbl, (p, v)))
+            from difflib import get_close_matches
+            choices = [k for k,_ in keys]
+            match = get_close_matches(target, choices, n=1, cutoff=0.5)
             if match:
-                prod, var = choice_map[match[0]]
+                prod, var = dict(keys)[match[0]]
+                print(f"🔍 [DEBUG] Fallback get_close_matches to: '{match[0]}' -> product {prod['name']}")
 
-                # Guardar nueva selección en memoria (no se envía a Gemini)
-                user_histories[from_number].append({
-                    "role": "context",
-                    "text": f"ctx:{match[0]}",  # campo text para consistencia
-                    "last_image_selection": {
-                        "product_name": prod["name"],
-                        "variant_id": var["id"] if var else None
-                    },
-                    "time": datetime.utcnow().isoformat()
-                })
-
-                # 5.5) Recopilar URLs: variante si existe, sino imagen principal
-                if var and var.get("product_images"):
-                    urls = [
-                        img["url"]
-                        for img in var["product_images"]
-                        if img["url"].lower().endswith((".png", ".jpg", ".jpeg"))
-                    ]
-                else:
-                    urls = []
-                    imgs = prod.get("product_images", [])
-                    if imgs:
-                        u = imgs[0]["url"]
-                        if u.lower().endswith((".png", ".jpg", ".jpeg")):
-                            urls = [u]
-
-                # 5.6) Enviar imágenes
-                if urls:
-                    send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí la(s) imagen(es) de *{prod['name']}*:")
-                    for url in urls:
-                        try:
-                            send_whatsapp_image(from_number, url, caption=prod["name"])
-                        except Exception as e:
-                            print(f"❌ [ERROR] sending image {url}: {e}")
-                            send_whatsapp_message(from_number, f"No pude enviar la imagen de {prod['name']}.")
-                    return
-
-            # Si no hubo match o no hay URLs
+        # Si no encontramos nada
+        if not prod:
             send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
             return
 
+        # 5.5) Recopilar URLs: variantes primero, luego generales
+        all_imgs = prod.get("product_images", [])
+        if var:
+            urls = [img["url"] for img in all_imgs if img.get("variant_id") == var["id"]]
+        else:
+            urls = []
+        if not urls:
+            urls = [img["url"] for img in all_imgs if img.get("variant_id") is None]
+
+        print(f"🔍 [DEBUG] URLs seleccionadas: {urls}")
+
+        # 5.6) Enviar labels + URLs
+        display_label = (var and ((var["options"].get("color") or var["options"].get("name")))) or prod["name"]
+        send_whatsapp_message(from_number,
+            f"¡Claro! 😊 Aquí las imágenes de *{display_label}*:")
+        for url in urls:
+            try:
+                send_whatsapp_image(from_number, url, caption=display_label)
+                print(f"✅ Enviada imagen: {url}")
+            except Exception as e:
+                print(f"❌ [ERROR] sending image {url}: {e}")
+                send_whatsapp_message(from_number, f"No pude enviar la imagen de {display_label}.")
+        return
+
+
+
+
         # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
+
 
         # ─── 7) Construir contexto textual para flujo de pedidos ─────────────────
         contexto_lines = []
