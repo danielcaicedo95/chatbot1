@@ -84,43 +84,49 @@ async def handle_user_message(body: dict):
                     choice_map[label.lower()] = (p, v)
 
         # ─── 5) BLOQUE MULTIMEDIA SIN PALABRAS CLAVE ───────────────────────────────
-        # 5.1) Armar prompt para Gemini, incluyendo labels e imágenes
+        # 5.1) Construir catálogo enriquecido
+        catalog = []
+        for p in productos:
+            # Variantes: extraigo un value puro + un label legible + sus URLs
+            variants = []
+            for v in p.get("product_variants", []):
+                # Tomo el primer valor en options como 'value'
+                opts = v["options"]
+                value = next(iter(opts.values())).lower()
+                label = v.get("variant_label") or f\"{next(iter(opts.keys()))}:{value}\"
+                imgs = [
+                    img["url"]
+                    for img in p.get("product_images", [])
+                    if img.get("variant_id") == v["id"]
+                ]
+                variants.append({"id": v["id"], "value": value, "label": label, "images": imgs})
+
+            # Imágenes del producto principal (sin variant_id)
+            main_imgs = [
+                img["url"] for img in p.get("product_images", [])
+                if img.get("variant_id") is None
+            ]
+
+            catalog.append({
+                "name": p["name"],
+                "variants": variants,
+                "images": main_imgs
+            })
+
         prompt_obj = {
             "user_request": raw_text,
-            "catalog": [
-                {
-                    "name": p["name"],
-                    "variants": [
-                        {
-                            "id": v["id"],
-                            "label": v["options"].get("color") or v["options"].get("name") or ",".join(f"{k}:{v}" for k,v in v["options"].items()),
-                            "images": [
-                                img["url"]
-                                for img in p["product_images"]
-                                if img.get("variant_id") == v["id"]
-                            ]
-                        }
-                        for v in p.get("product_variants", [])
-                    ],
-                    "images": [
-                        img["url"]
-                        for img in p["product_images"]
-                        if img.get("variant_id") is None
-                    ]
-                }
-                for p in productos
-            ],
+            "catalog": catalog,
             "instructions": [
                 "Devuelve JSON EXACTO sin Markdown:",
-                "  {'want_images': true, 'target': 'variant_label o nombre producto'}",
+                "  {'want_images': true, 'target': 'valor variante o nombre producto'}",
                 "o si no pide imágenes:",
                 "  {'want_images': false}"
             ]
         }
 
-        # 5.2) Filtrar historial para Gemini
+        # 5.2) Historial + llamada a Gemini
         hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
-        llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
+        llm_input = hist[-10:] + [{"role":"user","text":json.dumps(prompt_obj, ensure_ascii=False)}]
         llm_resp = await ask_gemini_with_history(llm_input)
         print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
 
@@ -134,97 +140,93 @@ async def handle_user_message(body: dict):
                 print("⚠️ [DEBUG] JSON parse error:", e)
         print("🔍 [DEBUG] Parsed multimedia action:", action)
 
-        # 5.4) Si Gemini indica want_images, procesar
+        # 5.4) Procesar si pide imágenes
         if action.get("want_images"):
-            target = action.get("target", "").strip().lower()
+            target = action.get("target","").strip().lower()
             print(f"🔍 [DEBUG] Gemini target normalized: '{target}'")
 
             prod = var = None
-            # Buscar en catálogo local
-            for p in productos:
-                # 1) Intentar match directo en variantes
-                for v in p.get("product_variants", []):
-                    label = (v["options"].get("color") or v["options"].get("name") or
-                            ",".join(f"{k}:{v}" for k,v in v["options"].items())
-                            ).lower()
-                    if label == target:
-                        prod, var = p, v
-                        print(f"🔍 [DEBUG] Matched variant by exact label: '{label}'")
-                        break
-                if prod:
-                    break
-                # 2) Intentar match por producto
-                if p["name"].lower() == target:
-                    prod, var = p, None
-                    print(f"🔍 [DEBUG] Matched product by exact name: '{p['name']}'")
-                    break
 
-            # 3) Fallbacks con substrings o get_close_matches
+            # 1) Exact match sobre value de variante
+            for entry in catalog:
+                for v in entry["variants"]:
+                    if v["value"] == target:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        var = v
+                        print(f"🔍 [DEBUG] Exact variant value match: '{v['value']}'")
+                        break
+                if prod: break
+
+            # 2) Exact match sobre nombre de producto
             if not prod:
-                # variantes
-                for p in productos:
-                    for v in p.get("product_variants", []):
-                        label = (v["options"].get("color") or v["options"].get("name") or "").lower()
-                        if label in target:
-                            prod, var = p, v
-                            print(f"🔍 [DEBUG] Substring variant match: '{label}'")
+                for entry in catalog:
+                    if entry["name"].lower() == target:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        var = None
+                        print(f"🔍 [DEBUG] Exact product name match: '{entry['name']}'")
+                        break
+
+            # 3) Substring match sobre value
+            if not prod:
+                for entry in catalog:
+                    for v in entry["variants"]:
+                        if v["value"] in target:
+                            prod = next(p for p in productos if p["name"] == entry["name"])
+                            var = v
+                            print(f"🔍 [DEBUG] Substring variant value match: '{v['value']}'")
                             break
                     if prod: break
-                # productos
-                if not prod:
-                    for p in productos:
-                        if p["name"].lower() in target:
-                            prod, var = p, None
-                            print(f"🔍 [DEBUG] Substring product match: '{p['name']}'")
-                            break
 
-            # 4) Si aún no hay match, usar get_close_matches
+            # 4) Fallback con get_close_matches
             if not prod:
-                keys = []
-                for p in productos:
-                    keys.append((p["name"].lower(), (p, None)))
-                    for v in p.get("product_variants", []):
-                        lbl = (v["options"].get("color") or v["options"].get("name") or "").lower()
-                        keys.append((lbl, (p, v)))
                 from difflib import get_close_matches
-                choices = [k for k,_ in keys]
+                choices = [v["value"] for e in catalog for v in e["variants"]] + [e["name"].lower() for e in catalog]
                 match = get_close_matches(target, choices, n=1, cutoff=0.5)
                 if match:
-                    prod, var = dict(keys)[match[0]]
-                    print(f"🔍 [DEBUG] Fallback get_close_matches to: '{match[0]}' -> product {prod['name']}")
+                    # buscar si coincide en variant o producto
+                    m0 = match[0]
+                    # buscar en variantes
+                    found = [(e,v) for e in catalog for v in e["variants"] if v["value"] == m0]
+                    if found:
+                        entry, v = found[0]
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        var = v
+                        print(f"🔍 [DEBUG] Fallback variant close match: '{m0}'")
+                    else:
+                        # producto
+                        entry = next(e for e in catalog if e["name"].lower() == m0)
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        var = None
+                        print(f"🔍 [DEBUG] Fallback product close match: '{m0}'")
 
             # Si no encontramos nada
             if not prod:
                 send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
                 return
 
-            # 5.5) Recopilar URLs: variantes primero, luego generales
-            all_imgs = prod.get("product_images", [])
-            if var:
-                urls = [img["url"] for img in all_imgs if img.get("variant_id") == var["id"]]
-            else:
-                urls = []
+            # 5.5) Recopilar URLs de la variante o principal
+            urls = var["images"] if var else prod.get("product_images", [])
             if not urls:
-                urls = [img["url"] for img in all_imgs if img.get("variant_id") is None]
+                # fallback a imágenes principales
+                urls = [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
 
             print(f"🔍 [DEBUG] URLs seleccionadas: {urls}")
 
-            # 5.6) Enviar labels + URLs
-            display_label = (var and ((var["options"].get("color") or var["options"].get("name")))) or prod["name"]
-            send_whatsapp_message(from_number,
-                f"¡Claro! 😊 Aquí las imágenes de *{display_label}*:")
-            for url in urls:
+            # 5.6) Envío
+            display = var["label"] if var else prod["name"]
+            send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí las imágenes de *{display}*:")
+            for u in urls:
                 try:
-                    send_whatsapp_image(from_number, url, caption=display_label)
-                    print(f"✅ Enviada imagen: {url}")
+                    send_whatsapp_image(from_number, u, caption=display)
+                    print(f"✅ Enviada imagen: {u}")
                 except Exception as e:
-                    print(f"❌ [ERROR] sending image {url}: {e}")
-                    send_whatsapp_message(from_number, f"No pude enviar la imagen de {display_label}.")
+                    print(f"❌ [ERROR] sending image {u}: {e}")
+                    send_whatsapp_message(from_number, f"No pude enviar la imagen de {display}.")
+
             return
 
-
-
         # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
+
 
 
         # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
