@@ -209,15 +209,19 @@ async def handle_user_message(body: dict):
             order_data["total"] = total
 
             # Enviar resumen
+            resumen_text = "\n".join(lineas)
             await send_whatsapp_message(
                 from_number,
-                "Aquí el resumen de tu pedido:\n"
-                f"{'\n'.join(lineas)}\n"
-                f"Subtotal: COP {subtotal:,}\n"
-                "Envío: COP 5,000\n"
-                f"Total: COP {total:,}\n"
-                "¿Confirmas? 😊"
-            )
+                (
+                    f"Aquí el resumen de tu pedido:\n"
+                    f"{resumen_text}\n"
+                    f"Subtotal: COP {subtotal:,}\n"
+                    f"Envío: COP 5,000\n"
+                    f"Total: COP {total:,}\n"
+                    "¿Confirmas? 😊"
+                )
+)
+
 
             # Inicializar formulario si faltan datos
             user_pending_data[from_number] = order_data
