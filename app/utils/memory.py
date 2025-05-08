@@ -9,3 +9,6 @@ user_orders = {}
 # Datos parciales que va dando el usuario antes de confirmar
 # phone_number -> { name, address, phone, payment_method, products, total }
 user_pending_data = {}
+
+# Contexto de conversación por usuario (último producto visto, etc.)
+user_context = {}
