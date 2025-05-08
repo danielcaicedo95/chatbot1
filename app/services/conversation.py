@@ -72,7 +72,9 @@ async def handle_user_message(body: dict):
                 "  {'want_images': false}"
             ]
         }
-        llm_input = user_histories[from_number][-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
+        llm_input = user_histories[from_number][-10:] + [
+            {"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}
+        ]
         llm_resp = await ask_gemini_with_history(llm_input)
         print("🔍 [DEBUG] Raw LLM multimedia response:\n", llm_resp)
 
@@ -87,8 +89,21 @@ async def handle_user_message(body: dict):
         print("🔍 [DEBUG] Parsed multimedia action:", action)
 
         if action.get("want_images"):
+            # 1) Verificar si LLM devolvió un target; si no, recuperar última selección
             target = action.get("target", "").strip()
-            # Construir lista de posibles matches (nombres y opciones)
+            if not target:
+                # buscamos la última entrada con role="context"
+                producto_name = None
+                variant_id = None
+                for entry in reversed(user_histories[from_number]):
+                    if entry.get("role") == "context":
+                        ctx = entry.get("last_image_selection", {})
+                        producto_name = ctx.get("product_name")
+                        variant_id = ctx.get("variant_id")
+                        break
+                target = producto_name or ""
+
+            # 2) Construir lista de posibles matches (nombres y opciones)
             choices = nombres + [
                 str(opt) for p in productos
                 for v in p.get("product_variants", [])
@@ -109,16 +124,30 @@ async def handle_user_message(body: dict):
                         if producto:
                             break
 
-                # Recopilar URLs compatibles
-                urls = []
-                if producto:
-                    urls += [img["url"] for img in producto.get("product_images", [])]
-                if variante:
-                    urls += [img["url"] for img in variante.get("product_images", [])]
-                urls = [u for u in urls if u.lower().endswith((".png", ".jpg", ".jpeg"))]
+                # ─── GUARDAR EN MEMORIA ESTA SELECCIÓN ───
+                user_histories[from_number].append({
+                    "role": "context",
+                    "last_image_selection": {
+                        "product_name": producto["name"] if producto else None,
+                        "variant_id": variante.get("id") if variante else None
+                    },
+                    "time": datetime.utcnow().isoformat()
+                })
 
+                # 3) Recopilar únicamente la imagen de variante (si existe) o la principal
+                if variante and variante.get("product_images"):
+                    urls = [img["url"] for img in variante["product_images"]
+                            if img["url"].lower().endswith((".png", ".jpg", ".jpeg"))]
+                elif producto and producto.get("product_images"):
+                    # solo la primera (principal)
+                    first_img = producto["product_images"][0]
+                    urls = [first_img["url"]] if first_img["url"].lower().endswith((".png", ".jpg", ".jpeg")) else []
+                else:
+                    urls = []
+
+                # 4) Enviar
                 if urls:
-                    send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí tienes las imágenes de *{sel}*:")
+                    send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí tienes la(s) imagen(es) de *{sel}*:")
                     for url in urls:
                         try:
                             send_whatsapp_image(from_number, url, caption=sel)
@@ -126,8 +155,10 @@ async def handle_user_message(body: dict):
                             print(f"❌ [ERROR] sending image {url}: {e}")
                             send_whatsapp_message(from_number, f"No pude enviar la imagen de {sel}.")
                     return
+
             # Si no hay match o no hay imágenes
-            send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más en lo que te pueda ayudar?")
+            send_whatsapp_message(from_number,
+                                  "Lo siento, no encontré imágenes para eso. ¿Algo más en lo que te pueda ayudar?")
             return
 
         # === FIN BLOQUE MULTIMEDIA ===
@@ -186,8 +217,7 @@ async def handle_user_message(body: dict):
             if recomendaciones:
                 texto_rec = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
                 send_whatsapp_message(from_number,
-                    f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?"
-                )
+                                      f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?")
 
         # 9) Procesar orden
         if not order_data:
