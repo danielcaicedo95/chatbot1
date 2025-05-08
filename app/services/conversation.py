@@ -170,20 +170,27 @@ async def handle_user_message(body: dict):
             contexto_lines = []
             for p in productos:
                 try:
-                    line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
                     variantes = p.get("product_variants") or []
-                    if variantes:
+
+                    if not variantes:
+                        line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
+                    else:
+                        line = f"- {p['name']}:"
                         opts = []
                         for v in variantes:
+                            price = v.get("price", p.get("price"))
+                            stock = v.get("stock", "N/A")
                             options_str = ",".join(f"{k}:{v2}" for k, v2 in v.get("options", {}).items())
-                            opts.append(f"{options_str} (stock {v.get('stock', 'N/A')})")
-                        line += " | Variantes: " + "; ".join(opts)
+                            opts.append(f"    • {options_str} — COP {price} (stock {stock})")
+                        line += "\n" + "\n".join(opts)
+
                     if p.get("product_images"):
-                        line += f" | Imágenes: {len(p['product_images'])}"
+                        line += f"\n    🖼️ Imágenes disponibles: {len(p['product_images'])}"
                     contexto_lines.append(line)
                 except Exception as e:
                     print(f"⚠️ Error en línea catálogo: {p.get('name')} -> {e}")
-            return "Catálogo actual:\n" + "\n".join(contexto_lines)
+            return "🛍️ Catálogo actual:\n\n" + "\n\n".join(contexto_lines)
+
 
         instrucciones = (
             f"{raw_text}\n\n{build_order_context(productos)}\n\n"
