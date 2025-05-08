@@ -1,3 +1,5 @@
+# app/services/conversation.py
+
 from datetime import datetime
 import json
 import re
@@ -14,151 +16,297 @@ from app.services.orders import process_order
 # Campos obligatorios para confirmar pedido
 REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
+# Función principal
 async def handle_user_message(body: dict):
     try:
-        # ─── 1) Depurar payload y extraer mensaje ───────────────────────────────
-        print("🔍 [DEBUG] Incoming webhook payload:\n", json.dumps(body, indent=2, ensure_ascii=False))
+        # ─── 1) Validar y extraer mensaje del webhook ─────────────────────────────
+        print("🔍 [DEBUG] Incoming webhook payload:")
+        print(json.dumps(body, indent=2, ensure_ascii=False))
+
         entry = body.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
         messages = changes.get("value", {}).get("messages")
+
         if not messages:
-            print("⚠️ [DEBUG] No messages in payload")
+            print("⚠️ [DEBUG] No se encontraron mensajes en el payload.")
             return
 
         msg = messages[0]
         raw_text = msg.get("text", {}).get("body", "").strip()
         from_number = msg.get("from")
-        print(f"🔍 [DEBUG] From: {from_number}, Text: '{raw_text}'")
+
         if not raw_text or not from_number:
-            print("⚠️ [DEBUG] Missing text or from_number")
+            print("⚠️ [DEBUG] Faltan campos obligatorios: texto o número de origen.")
             return
 
-        # ─── 2) Guardar en historial y Supabase ───────────────────────────────────
+        print(f"🔍 [DEBUG] Mensaje recibido de {from_number}: '{raw_text}'")
+
+        # Aquí seguiría tu lógica completa...
+    
+    except Exception:
+        print("❌ [ERROR] en handle_user_message:\n", traceback.format_exc())
+
+
+        # ─── 2) Registrar mensaje en historial y Supabase ────────────────────────
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": raw_text,
             "time": datetime.utcnow().isoformat()
         })
+
         await save_message_to_supabase(from_number, "user", raw_text)
 
-        # ─── 3) Cargar catálogo y preparar estructuras ────────────────────────────
-        productos = await get_all_products()
 
-        # Preparar choice_map si se necesitara para algún fallback interno (no expuesto al usuario)
-        choice_map = {}
-        def extract_labels(o, labels):
-            if isinstance(o, dict):
-                for v in o.values(): extract_labels(v, labels)
-            elif isinstance(o, list):
-                for v in o: extract_labels(v, labels)
-            elif isinstance(o, str): labels.append(o)
+        # ─── 3) Cargar catálogo y construir mapa de opciones ────────────────────────────
+        try:
+            productos = await get_all_products()
+            if not productos:
+                print("⚠️ [DEBUG] No se encontraron productos en el catálogo.")
+                await send_whatsapp_message(from_number, "Lo siento, no hay productos disponibles en este momento.")
+                return
 
-        for p in productos:
-            choice_map[p['name'].lower()] = (p, None)
-            for v in p.get('product_variants', []):
+            # choice_map: texto usuario → (producto, variante) posible
+            choice_map = {}
+
+            def extract_labels(obj) -> list[str]:
+                """Extrae todas las etiquetas tipo string de un objeto anidado."""
                 labels = []
-                extract_labels(v.get('options', {}), labels)
-                for label in labels:
-                    choice_map[label.lower()] = (p, v)
 
-        # Enriquecer catálogo para LLM
-        catalog = []
-        for p in productos:
-            base_price = p.get('price', 0) or 0
-            base_stock = p.get('stock', 0) if p.get('stock', 0) >= 0 else 0
-            variants = []
-            for v in p.get('product_variants', []):
-                opts = v.get('options', {})
-                v_price = v.get('price', base_price) or base_price
-                v_stock = v.get('stock', base_stock) if v.get('stock', base_stock) >= 0 else base_stock
-                value = next(iter(opts.values())).lower() if opts else ''
-                label = v.get('variant_label') or ','.join(f"{k}:{opts[k]}" for k in opts)
-                imgs = [img['url'] for img in p.get('product_images', []) if img.get('variant_id') == v.get('id')]
-                variants.append({
-                    'id': v.get('id'),
-                    'value': value,
-                    'label': label,
-                    'price': v_price,
-                    'stock': v_stock,
-                    'images': imgs
-                })
-            main_imgs = [img['url'] for img in p.get('product_images', []) if img.get('variant_id') is None]
-            catalog.append({
-                'name': p.get('name'),
-                'price': base_price,
-                'stock': base_stock,
-                'variants': variants,
-                'images': main_imgs
-            })
+                def _extract(o):
+                    if isinstance(o, dict):
+                        for v in o.values():
+                            _extract(v)
+                    elif isinstance(o, list):
+                        for v in o:
+                            _extract(v)
+                    elif isinstance(o, str):
+                        labels.append(o)
 
-        # ─── 4) Construir y enviar prompt a Gemini ───────────────────────────────
-        hist = user_histories[from_number][-10:]
-        prompt_obj = {
-            'history': hist,
-            'catalog': catalog,
-            'instructions': [
-                "Detecta si el usuario solicita ver imágenes; devuelve {type:'images',urls:[...],caption:''} (sin texto extra al enviar),",
-                "De lo contrario, responde {type:'text',content:'mensaje humano'};",
-                "Para ventas, sugiere productos, calcula subtotal + COP 5.000 envío, recomienda uno más, y al final recopila datos de pedido por formularios,",
-                "sin exponer ninguna estructura JSON en WhatsApp."
-            ]
-        }
-        llm_input = hist + [{'role': 'user', 'text': json.dumps(prompt_obj, ensure_ascii=False)}]
-        # Manejo robusto de fallo en Gemini
-        try:
-            llm_resp = await ask_gemini_with_history(llm_input)
+                _extract(obj)
+                return labels
+
+            for producto in productos:
+                nombre = producto.get("name", "").strip().lower()
+                if not nombre:
+                    continue
+
+                choice_map[nombre] = (producto, None)
+
+                for variante in producto.get("product_variants", []):
+                    opciones = variante.get("options", {})
+                    etiquetas = extract_labels(opciones)
+                    for etiqueta in etiquetas:
+                        etiqueta_normalizada = etiqueta.strip().lower()
+                        if etiqueta_normalizada:
+                            choice_map[etiqueta_normalizada] = (producto, variante)
+
+            print(f"🔍 [DEBUG] choice_map generado con {len(choice_map)} entradas.")
+
         except Exception as e:
-            print(f"❌ Error HTTP al llamar a Gemini: {e}")
-            llm_resp = json.dumps({'type': 'text', 'content': 'Hubo un problema de conexión al generar la respuesta.'}, ensure_ascii=False)
+            print("❌ [ERROR] al cargar el catálogo o construir el choice_map:")
+            print(traceback.format_exc())
+            await send_whatsapp_message(from_number, "Ocurrió un error al procesar el catálogo. Intenta más tarde.")
+            return
 
-        print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
+       # ─── 5) BLOQUE MULTIMEDIA SIN PALABRAS CLAVE ───────────────────────────────
 
-        # ─── 5) Parsear respuesta de Gemini ─────────────────────────────────────
+        def build_catalog(productos: list[dict]) -> list[dict]:
+            catalog = []
+            for p in productos:
+                variants = []
+                for v in p.get("product_variants", []):
+                    opts = v.get("options", {})
+                    if not opts:
+                        continue
+                    value = next(iter(opts.values())).lower()
+                    key0 = next(iter(opts.keys()))
+                    label = v.get("variant_label") or f"{key0}:{value}"
+                    imgs = [img["url"] for img in p.get("product_images", []) if img.get("variant_id") == v["id"]]
+                    variants.append({"id": v["id"], "value": value, "label": label, "images": imgs})
+
+                main_imgs = [img["url"] for img in p.get("product_images", []) if img.get("variant_id") is None]
+
+                catalog.append({
+                    "name": p["name"],
+                    "variants": variants,
+                    "images": main_imgs
+                })
+            return catalog
+
+        def match_target_in_catalog(catalog, productos, target):
+            from difflib import get_close_matches
+            target = target.strip().lower()
+
+            for entry in catalog:
+                for v in entry["variants"]:
+                    if v["value"] == target:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        return prod, v
+
+            for entry in catalog:
+                if entry["name"].lower() == target:
+                    prod = next(p for p in productos if p["name"] == entry["name"])
+                    return prod, None
+
+            for entry in catalog:
+                for v in entry["variants"]:
+                    if v["value"] in target:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        return prod, v
+
+            choices = [v["value"] for e in catalog for v in e["variants"]] + [e["name"].lower() for e in catalog]
+            match = get_close_matches(target, choices, n=1, cutoff=0.5)
+            if match:
+                m0 = match[0]
+                for entry in catalog:
+                    for v in entry["variants"]:
+                        if v["value"] == m0:
+                            prod = next(p for p in productos if p["name"] == entry["name"])
+                            return prod, v
+                for entry in catalog:
+                    if entry["name"].lower() == m0:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        return prod, None
+
+            return None, None
+
+        async def handle_image_request(productos, raw_text, from_number, user_histories):
+            catalog = build_catalog(productos)
+            
+            prompt_obj = {
+                "user_request": raw_text,
+                "catalog": catalog,
+                "instructions": [
+                    "Devuelve JSON EXACTO sin Markdown:",
+                    "  {'want_images': true, 'target': 'valor variante o nombre producto'}",
+                    "o si no pide imágenes:",
+                    "  {'want_images': false}"
+                ]
+            }
+
+            hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
+            llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
+            llm_resp = await ask_gemini_with_history(llm_input)
+
+            print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
+
+            try:
+                action = json.loads(re.search(r"\{[\s\S]*\}", llm_resp).group())
+            except Exception as e:
+                print("⚠️ [DEBUG] JSON parse error:", e)
+                action = {"want_images": False}
+
+            print("🔍 [DEBUG] Parsed multimedia action:", action)
+
+            if not action.get("want_images"):
+                return
+
+            prod, var = match_target_in_catalog(catalog, productos, action.get("target", ""))
+            if not prod:
+                send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
+                return
+
+            urls = var["images"] if var else [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
+            if not urls:
+                send_whatsapp_message(from_number, f"No encontré imágenes para {prod['name']}.")
+                return
+
+            display = var["label"] if var else prod["name"]
+            send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí las imágenes de *{display}*:")
+
+            for u in urls:
+                try:
+                    send_whatsapp_image(from_number, u, caption=display)
+                    print(f"✅ Enviada imagen: {u}")
+                except Exception as e:
+                    print(f"❌ [ERROR] sending image {u}: {e}")
+                    send_whatsapp_message(from_number, f"No pude enviar una imagen de {display}.")
+
+
+        # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
+
+
+       # ─── 7) Construir contexto textual para flujo de pedidos ─────────────────
+        def build_order_context(productos: list[dict]) -> str:
+            contexto_lines = []
+            for p in productos:
+                try:
+                    line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
+                    variantes = p.get("product_variants") or []
+                    if variantes:
+                        opts = []
+                        for v in variantes:
+                            options_str = ",".join(f"{k}:{v2}" for k, v2 in v.get("options", {}).items())
+                            opts.append(f"{options_str} (stock {v.get('stock', 'N/A')})")
+                        line += " | Variantes: " + "; ".join(opts)
+                    if p.get("product_images"):
+                        line += f" | Imágenes: {len(p['product_images'])}"
+                    contexto_lines.append(line)
+                except Exception as e:
+                    print(f"⚠️ [DEBUG] Error construyendo línea de contexto para producto: {p.get('name')} -> {e}")
+            return "Catálogo actual:\n" + "\n".join(contexto_lines)
+
+        # ─── 8) Instrucciones y llamada a Gemini para el flujo de pedidos ────────
+        order_context = build_order_context(productos)
+        instrucciones = (
+            f"{raw_text}\n\n{order_context}\n\n"
+            "INSTRUCCIONES:\n"
+            "1. Si un producto no está disponible, sugiere alternativa.\n"
+            "2. Si hay intención de compra, detalla:\n"
+            "   - Productos, cantidad y precio\n"
+            "   - Subtotal + COP 5.000 envío\n"
+            "   - ¿Deseas algo más?\n"
+            "   - Recomienda 1 producto adicional\n"
+            "   - Si 'no', pide nombre, dirección, teléfono y pago.\n"
+            "3. Usa emojis y tono cercano.\n"
+            "4. Al confirmar, al final incluye este JSON EXACTO:\n"
+            "{\"order_details\":{\"name\":\"NOMBRE\",\"address\":\"DIRECCIÓN\",\"phone\":\"TELÉFONO\",\"payment_method\":\"TIPO_PAGO\",\"products\":[{\"name\":\"NOMBRE\",\"quantity\":1,\"price\":0}],\"total\":0}}"
+        )
+
         try:
-            resp_obj = json.loads(llm_resp)
+            hist2 = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
+            llm_resp2 = await ask_gemini_with_history(hist2 + [{"role": "user", "text": instrucciones}])
+            print("💬 [DEBUG] LLM order flow response:\n", llm_resp2)
+
+            # ─── 9) Extraer y procesar pedido ────────────────────────────────────────
+            from app.utils.extractors import extract_order_data
+            order_data, clean_text = extract_order_data(llm_resp2)
+
+            print("🔍 [DEBUG] order_data:\n", order_data)
+            print("🔍 [DEBUG] clean_text:\n", clean_text)
+
+            user_histories[from_number].append({
+                "role": "model",
+                "text": clean_text,
+                "time": datetime.utcnow().isoformat()
+            })
+            await save_message_to_supabase(from_number, "model", clean_text)
+
+            # ─── 10) Recomendaciones y procesamiento de orden ────────────────────────
+            if order_data and order_data.get("products"):
+                recomendaciones = await get_recommended_products(order_data["products"])
+                if recomendaciones:
+                    texto_rec = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
+                    send_whatsapp_message(
+                        from_number,
+                        f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?"
+                    )
+
+            if not order_data:
+                send_whatsapp_message(from_number, clean_text)
+            else:
+                result = await process_order(from_number, order_data)
+                status = result.get("status")
+                if status == "missing":
+                    campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
+                    send_whatsapp_message(from_number, f"📋 Faltan datos:\n{campos}")
+                elif status == "created":
+                    send_whatsapp_message(from_number, "✅ Pedido confirmado. ¡Gracias! 🎉")
+                elif status == "updated":
+                    send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
+                else:
+                    send_whatsapp_message(from_number, "❌ Error guardando el pedido.")
+
         except Exception:
-            resp_obj = {'type': 'text', 'content': llm_resp}
-
-        # ─── 6) Enviar imágenes sin texto si corresponde ────────────────────────
-        if resp_obj.get('type') == 'images':
-            urls = resp_obj.get('urls', [])[:10]
-            for url in urls:
-                await send_whatsapp_image(from_number, url)
-            return
-
-        # ─── 7) Preparar y enviar texto humano para conversación/venta ──────────
-        # Garantizar mensaje válido
-        user_message = resp_obj.get('content') or raw_text or 'Lo siento, algo salió mal.'
-        # Guardar en historial y Supabase
-        user_histories[from_number].append({'role': 'model', 'text': user_message, 'time': datetime.utcnow().isoformat()})
-        await save_message_to_supabase(from_number, 'model', user_message)
-        await send_whatsapp_message(from_number, user_message)
-
-        # ─── 8) Extraer datos de pedido si el usuario rellena el formulario ─────
-        from app.utils.extractors import extract_order_data
-        order_data, clean_text = extract_order_data(user_message)
-        if not order_data or not order_data.get('products'):
-            return
-
-        # ─── 9) Recomendar productos adicionales ───────────────────────────────
-        recomendaciones = await get_recommended_products(order_data['products'])
-        if recomendaciones:
-            texto_rec = '\n'.join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
-            await send_whatsapp_message(from_number, f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?")
-            return
-
-        # ─── 10) Procesar orden y responder según status ────────────────────────
-        result = await process_order(from_number, order_data)
-        status = result.get('status')
-        if status == 'missing':
-            campos = '\n'.join(f"- {f.replace('_', ' ')}" for f in result.get('fields', []))
-            await send_whatsapp_message(from_number, f"📋 Faltan datos:\n{campos}")
-        elif status == 'created':
-            await send_whatsapp_message(from_number, '✅ Pedido confirmado. ¡Gracias! 🎉')
-        elif status == 'updated':
-            await send_whatsapp_message(from_number, '♻️ Pedido actualizado correctamente.')
-        else:
-            await send_whatsapp_message(from_number, '❌ Error guardando el pedido.')
-
-    except Exception:
-        print("❌ [ERROR] in handle_user_message:\n", traceback.format_exc())
+            print("❌ [ERROR] en flujo de pedidos:\n", traceback.format_exc())
+            send_whatsapp_message(from_number, "❌ Hubo un error procesando tu pedido. Intenta de nuevo o escríbenos.")
