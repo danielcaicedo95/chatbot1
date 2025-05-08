@@ -87,23 +87,31 @@ async def handle_user_message(body: dict):
         # 5.1) Construir catálogo enriquecido
         catalog = []
         for p in productos:
-            # Variantes: extraigo un value puro + un label legible + sus URLs
             variants = []
             for v in p.get("product_variants", []):
-                # Tomo el primer valor en options como 'value'
                 opts = v["options"]
+                # Valor puro para matching (primer campo de options)
                 value = next(iter(opts.values())).lower()
-                label = v.get("variant_label") or f\"{next(iter(opts.keys()))}:{value}\"
+                # Label legible para caption
+                key0 = next(iter(opts.keys()))
+                label = v.get("variant_label") or f"{key0}:{value}"
+                # URLs de esa variante
                 imgs = [
                     img["url"]
                     for img in p.get("product_images", [])
                     if img.get("variant_id") == v["id"]
                 ]
-                variants.append({"id": v["id"], "value": value, "label": label, "images": imgs})
+                variants.append({
+                    "id": v["id"],
+                    "value": value,
+                    "label": label,
+                    "images": imgs
+                })
 
-            # Imágenes del producto principal (sin variant_id)
+            # URLs principales (sin variant_id)
             main_imgs = [
-                img["url"] for img in p.get("product_images", [])
+                img["url"]
+                for img in p.get("product_images", [])
                 if img.get("variant_id") is None
             ]
 
@@ -126,7 +134,7 @@ async def handle_user_message(body: dict):
 
         # 5.2) Historial + llamada a Gemini
         hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
-        llm_input = hist[-10:] + [{"role":"user","text":json.dumps(prompt_obj, ensure_ascii=False)}]
+        llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
         llm_resp = await ask_gemini_with_history(llm_input)
         print("🔍 [DEBUG] Raw multimedia response:\n", llm_resp)
 
@@ -142,7 +150,7 @@ async def handle_user_message(body: dict):
 
         # 5.4) Procesar si pide imágenes
         if action.get("want_images"):
-            target = action.get("target","").strip().lower()
+            target = action.get("target", "").strip().lower()
             print(f"🔍 [DEBUG] Gemini target normalized: '{target}'")
 
             prod = var = None
@@ -155,7 +163,8 @@ async def handle_user_message(body: dict):
                         var = v
                         print(f"🔍 [DEBUG] Exact variant value match: '{v['value']}'")
                         break
-                if prod: break
+                if prod:
+                    break
 
             # 2) Exact match sobre nombre de producto
             if not prod:
@@ -175,7 +184,8 @@ async def handle_user_message(body: dict):
                             var = v
                             print(f"🔍 [DEBUG] Substring variant value match: '{v['value']}'")
                             break
-                    if prod: break
+                    if prod:
+                        break
 
             # 4) Fallback con get_close_matches
             if not prod:
@@ -183,17 +193,16 @@ async def handle_user_message(body: dict):
                 choices = [v["value"] for e in catalog for v in e["variants"]] + [e["name"].lower() for e in catalog]
                 match = get_close_matches(target, choices, n=1, cutoff=0.5)
                 if match:
-                    # buscar si coincide en variant o producto
                     m0 = match[0]
-                    # buscar en variantes
-                    found = [(e,v) for e in catalog for v in e["variants"] if v["value"] == m0]
+                    # Buscar en variantes
+                    found = [(e, v) for e in catalog for v in e["variants"] if v["value"] == m0]
                     if found:
                         entry, v = found[0]
                         prod = next(p for p in productos if p["name"] == entry["name"])
                         var = v
                         print(f"🔍 [DEBUG] Fallback variant close match: '{m0}'")
                     else:
-                        # producto
+                        # Producto
                         entry = next(e for e in catalog if e["name"].lower() == m0)
                         prod = next(p for p in productos if p["name"] == entry["name"])
                         var = None
@@ -204,15 +213,15 @@ async def handle_user_message(body: dict):
                 send_whatsapp_message(from_number, "Lo siento, no encontré imágenes para eso. ¿Algo más?")
                 return
 
-            # 5.5) Recopilar URLs de la variante o principal
-            urls = var["images"] if var else prod.get("product_images", [])
+            # 5.5) Recopilar URLs
+            urls = var["images"] if var else catalog[[e["name"] for e in catalog].index(prod["name"])]["images"]
             if not urls:
-                # fallback a imágenes principales
+                # Fallback a principales
                 urls = [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
 
             print(f"🔍 [DEBUG] URLs seleccionadas: {urls}")
 
-            # 5.6) Envío
+            # 5.6) Enviar
             display = var["label"] if var else prod["name"]
             send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí las imágenes de *{display}*:")
             for u in urls:
@@ -226,11 +235,6 @@ async def handle_user_message(body: dict):
             return
 
         # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
-
-
-
-        # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
-
 
 
         # ─── 6) FIN BLOQUE MULTIMEDIA ──────────────────────────────────────────────
