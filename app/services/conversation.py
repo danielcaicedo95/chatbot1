@@ -2,171 +2,179 @@ from datetime import datetime
 import json
 import re
 import traceback
+
 from difflib import get_close_matches
-
-from app.utils.memory import user_histories
+from app.utils.memory import user_histories, user_context
 from app.clients.gemini import ask_gemini_with_history
-from app.clients.whatsapp import send_whatsapp_message, send_whatsapp_image
-from app.services.supabase import save_message_to_supabase
-from app.services.products import get_all_products, get_recommended_products
-from app.services.orders import process_order
+from app.clients.whatsapp import (
+    send_whatsapp_message,
+    send_whatsapp_image
+)
+try:
+    from app.clients.whatsapp import send_typing_indicator
+except ImportError:
+    async def send_typing_indicator(_):
+        pass
 
-# Campos obligatorios para confirmar pedido
+from app.services.supabase import save_message_to_supabase
+from app.services.products import get_all_products
+
 REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
 async def handle_user_message(body: dict):
     try:
-        # 1) Depurar payload completo
-        print("🔍 [DEBUG] Incoming webhook payload:\n", json.dumps(body, indent=2, ensure_ascii=False))
         entry = body.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
-        messages = changes.get("value", {}).get("messages")
+        messages = changes.get("value", {}).get("messages", [])
         if not messages:
-            print("⚠️ [DEBUG] No messages in payload")
             return
-
         msg = messages[0]
         raw_text = msg.get("text", {}).get("body", "").strip()
-        from_number = msg.get("from")
-        print(f"🔍 [DEBUG] From: {from_number}, Text: '{raw_text}'")
-        if not raw_text or not from_number:
-            print("⚠️ [DEBUG] Missing text or from_number")
+        if not raw_text:
             return
+        from_number = msg.get("from")
+        if not from_number:
+            return
+        normalized = raw_text.lower()
 
-        # 2) Guardar en historial y Supabase
         user_histories.setdefault(from_number, []).append({
             "role": "user",
             "text": raw_text,
             "time": datetime.utcnow().isoformat()
         })
         await save_message_to_supabase(from_number, "user", raw_text)
+        user_context.setdefault(from_number, {})
 
-        # 3) Saludo inicial si es primera interacción
-        if len(user_histories[from_number]) == 1:
-            saludo = "¡Hola! 👋 Soy tu asistente de Licores El Roble. ¿En qué puedo ayudarte hoy?"
-            user_histories[from_number].append({"role": "model", "text": saludo, "time": datetime.utcnow().isoformat()})
-            await save_message_to_supabase(from_number, "model", saludo)
-            send_whatsapp_message(from_number, saludo)
-            return
+        await send_typing_indicator(from_number)
 
-        # 4) Obtener catálogo completo con variantes e imágenes
         productos = await get_all_products()
+        for p in productos:
+            p_price = p.get("price", 0)
+            p_stock = p.get("stock", 0)
+            p["price_numeric"] = p_price
+            p["price"] = f"COP {p_price:,}" if p_price > 0 else "Consultar"
+            p["stock"] = p_stock if p_stock > 0 else "Agotado"
+            for v in p.get("product_variants", []):
+                v_price = v.get("price", 0)
+                v_stock = v.get("stock", 0)
+                v["price"] = f"COP {v_price:,}" if v_price > 0 else "Consultar"
+                v["stock"] = v_stock if v_stock > 0 else "Agotado"
 
-        # 5) Detectar petición de imágenes sin LLM
-        if re.search(r"\b(foto|imagen)s?\b", raw_text, re.IGNORECASE):
-            # Buscamos coincidencia en nombre de producto o variante
-            choice = None
-            for p in productos:
-                if p["name"].lower() in raw_text.lower():
-                    choice = (p, None)
-                    break
-                for v in p.get("product_variants", []):
-                    opts = [str(val).lower() for val in v.get("options", {}).values()]
-                    if any(opt in raw_text.lower() for opt in opts):
-                        choice = (p, v)
-                        break
-                if choice:
-                    break
-            # Si no hay match exacto, fuzzy
-            if not choice:
-                names = [p["name"] for p in productos]
-                match = get_close_matches(raw_text, names, n=1, cutoff=0.5)
-                if match:
-                    prod = next(p for p in productos if p["name"] == match[0])
-                    choice = (prod, None)
-            # Si aún no hay match
-            if not choice:
-                send_whatsapp_message(from_number, "No encontré ese producto. ¿Puedes revisar el nombre? 😕")
-                return
-
-            prod, var = choice
-            # Recopilar URLs
-            urls = []
-            caption = prod["name"] if not var else ",".join(f"{k}:{v}" for k,v in var.get("options", {}).items())
-            if var:
-                for img in var.get("product_images", []):
-                    urls.append(img.get("url"))
+        if re.search(r"\b(foto|imagen|muestra|ver)\b", normalized):
+            last = user_context[from_number].get("last_selection")
+            selected = None
+            if last:
+                selected = last
             else:
-                for img in prod.get("product_images", []):
-                    urls.append(img.get("url"))
-            # filtrar formatos
-            urls = [u for u in urls if u and u.lower().endswith((".png",".jpg",".jpeg"))]
-            if not urls:
-                send_whatsapp_message(from_number, "Lo siento, no hay imágenes compatibles para mostrar. 😔")
+                for p in productos:
+                    if p["name"].lower() in normalized:
+                        selected = (p, None)
+                        break
+                    for v in p.get("product_variants", []):
+                        if any(str(val).lower() in normalized for val in v.get("options", {}).values()):
+                            selected = (p, v)
+                            break
+                    if selected:
+                        break
+            if not selected:
+                await send_whatsapp_message(from_number, "Lo siento, no encontré esa imagen. ¿De qué producto hablamos? 😊")
                 return
-            send_whatsapp_message(from_number, f"¡Claro! 😊 Aquí tienes las fotos de {caption}:")
+            prod, var = selected
+            user_context[from_number]["last_selection"] = selected
+            urls = []
+            if var:
+                urls = [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") == var["id"]]
+            if not urls:
+                urls = [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
+            if not urls:
+                await send_whatsapp_message(from_number, "Lo siento, no tengo imágenes disponibles de eso.")
+                return
             for url in urls:
-                try:
-                    send_whatsapp_image(from_number, url, caption=caption)
-                except Exception as e:
-                    print(f"❌ [ERROR] sending image {url}: {e}")
-                    send_whatsapp_message(from_number, f"No pude enviar la imagen de {caption}.")
+                await send_whatsapp_image(from_number, url)
             return
 
-        # 6) Flujo de texto/pedidos: construir contexto rico
         contexto_lines = []
         for p in productos:
-            line = f"- {p['name']}: COP {p['price']} (stock {p['stock']})"
-            variantes = p.get('product_variants') or []
-            if variantes:
+            line = f"- {p['name']}: {p['price']} (stock {p['stock']})"
+            variants = p.get("product_variants", [])
+            if variants:
                 opts = []
-                for v in variantes:
-                    opts.append(
-                        f"{','.join(f'{k}:{v2}' for k,v2 in v['options'].items())} (stock {v['stock']})"
-                    )
-                line += f" | Variantes: {', '.join(opts)}"
-            imgs = p.get('product_images') or []
-            if imgs:
-                line += f" | Imágenes: {len(imgs)}"
+                for v in variants:
+                    label = ",".join(f"{k}:{v2}" for k, v2 in v["options"].items())
+                    opts.append(f"{label} (stock {v['stock']}, {v['price']})")
+                line += " | Variantes: " + "; ".join(opts)
             contexto_lines.append(line)
-        contexto = "Catálogo actual:\n" + "\n".join(contexto_lines)
-        print("🔍 [DEBUG] Contexto construido:\n", contexto)
+        contexto = "Catálogo:\n" + "\n".join(contexto_lines)
 
-        # 7) Instrucciones al LLM para pedidos (incluye payment_method)
+        await send_typing_indicator(from_number)
         instrucciones = (
-            f"{raw_text}\n\n{contexto}\n\n"
-            "INSTRUCCIONES:\n"
-            "1. Si un producto no está disponible, sugiere alternativa.\n"
-            "2. Si hay intención de compra, detalla productos, cantidad, precio + COP 5.000 envío.\n"
-            "3. Recomienda 1 producto adicional.\n"
-            "4. Si el usuario dice 'no', pide nombre, dirección, teléfono y método de pago.\n"
-            "5. Al confirmar, al final incluye este JSON EXACTO:\n"
-            "{\"order_details\":{\"name\":\"NOMBRE\",\"address\":\"DIRECCIÓN\",\"phone\":\"TELÉFONO\",\"payment_method\":\"TIPO_PAGO\",\"products\":[{\"name\":\"NOMBRE\",\"quantity\":1,\"price\":0}],\"total\":0}}"
+            f"Usuario: {raw_text}\n{contexto}\n"
+            "Actúa como un vendedor experto y amable.\n"
+            "- Sé conversacional y humano, sin saludos genéricos.\n"
+            "- Si no hay stock, dilo y ofrece alternativa persuasiva.\n"
+            "- Si el usuario muestra intención de compra, calcula subtotal + COP 5.000 de envío y pregunta si desea algo más.\n"
+            "- Sugiere un producto adicional basado en su carrito.\n"
+            "- Cuando confirme, pide: nombre, dirección, teléfono y método de pago.\n"
+            "- No envíes JSON al usuario."
         )
-        user_histories[from_number].append({"role": "user", "text": instrucciones})
-        llm_resp = await ask_gemini_with_history(user_histories[from_number])
-        print("💬 [DEBUG] LLM order flow response:\n", llm_resp)
+        hist = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
+        llm_resp = await ask_gemini_with_history(hist + [{"role": "user", "text": instrucciones}])
 
-        from app.utils.extractors import extract_order_data
-        order_data, clean_text = extract_order_data(llm_resp)
-        print("🔍 [DEBUG] order_data:\n", order_data)
-        print("🔍 [DEBUG] clean_text:\n", clean_text)
-
-        # 8) Guardar respuesta limpia y enviar
+        clean_text = re.sub(r"\{.*?\}", "", llm_resp, flags=re.DOTALL).strip()
         user_histories[from_number].append({"role": "model", "text": clean_text, "time": datetime.utcnow().isoformat()})
         await save_message_to_supabase(from_number, "model", clean_text)
+        await send_typing_indicator(from_number)
+        await send_whatsapp_message(from_number, clean_text)
 
-        # 9) Recomendaciones y procesar pedido
+        from app.utils.extractors import extract_order_data
+        from app.services.orders import process_order
+        from app.services.products import get_recommended_products
+
+        order_data, _ = extract_order_data(llm_resp)
         if order_data and order_data.get("products"):
+            lineas = []
+            subtotal = 0
+            for item in order_data["products"]:
+                nombre = item.get("name")
+                cantidad = int(item.get("quantity", 1))
+                producto = next((p for p in productos if p["name"] == nombre), None)
+                if not producto:
+                    continue
+                precio_unit = producto.get("price_numeric", 0)
+                total_item = precio_unit * cantidad
+                subtotal += total_item
+                lineas.append(f"{cantidad} x {nombre} (COP {precio_unit:,}) = COP {total_item:,}")
+                item["price"] = precio_unit
+
+            total = subtotal + 5000
+            order_data["total"] = total
+
+            resumen = "\n".join(lineas)
+            await send_whatsapp_message(
+                from_number,
+                f"Aquí el resumen de tu pedido:\n{resumen}\nSubtotal: COP {subtotal:,}\nEnvío: COP 5,000\nTotal: COP {total:,}\n¿Confirmas? 😊"
+            )
+
             recomendaciones = await get_recommended_products(order_data["products"])
             if recomendaciones:
-                texto_rec = "\n".join(f"- {r['name']}: COP {r['price']}" for r in recomendaciones)
-                send_whatsapp_message(from_number, f"🧠 Podrías acompañar tu pedido con:\n{texto_rec}\n¿Te interesa alguno?")
+                texto_rec = "\n".join(f"- {r['name']}: COP {int(r['price']):,}" for r in recomendaciones)
+                await send_whatsapp_message(
+                    from_number,
+                    f"🧠 También te podría interesar:\n{texto_rec}\n¿Qué opinas? 😊"
+                )
 
-        if not order_data:
-            send_whatsapp_message(from_number, clean_text)
-        else:
             result = await process_order(from_number, order_data)
             status = result.get("status")
             if status == "missing":
-                campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
-                send_whatsapp_message(from_number, f"📋 Faltan datos:\n{campos}")
+                faltantes = result.get("fields", [])
+                campos = "\n".join(f"- {f.replace('_',' ')}" for f in faltantes)
+                await send_whatsapp_message(from_number, f"📋 Falta información:\n{campos}")
             elif status == "created":
-                send_whatsapp_message(from_number, "✅ Pedido confirmado. ¡Gracias! 🎉")
+                await send_whatsapp_message(from_number, "✅ Tu pedido ha sido confirmado. ¡Gracias! 🎉")
             elif status == "updated":
-                send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
+                await send_whatsapp_message(from_number, "♻️ Pedido actualizado correctamente.")
             else:
-                send_whatsapp_message(from_number, "❌ Error guardando el pedido.")
-
+                await send_whatsapp_message(from_number, "❌ Hubo un error procesando tu pedido.")
+        return
     except Exception:
-        print("❌ [ERROR] in handle_user_message:\n", traceback.format_exc())
+        traceback.print_exc()
