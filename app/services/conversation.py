@@ -1,29 +1,39 @@
 # app/services/conversation.py
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone # timezone añadido para consistencia
 import json
 import re
 import traceback
 from difflib import get_close_matches
-import logging
+import logging # Añadido para mejor logging
 
 from app.utils.memory import user_histories
-from app.clients.gemini import ask_gemini_with_history
+from app.clients.gemini import ask_gemini_with_history # Tu cliente Gemini con reintentos
 from app.clients.whatsapp import send_whatsapp_message, send_whatsapp_image
 from app.services.supabase import save_message_to_supabase
-# Importar funciones específicas de products.py que podríamos usar para recomendaciones más avanzadas
-from app.services.products import get_all_products, get_recommended_products, search_products_by_keyword
+from app.services.products import get_all_products, get_recommended_products
 from app.services.orders import process_order
 from app.utils.extractors import extract_order_data
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
-REQUIRED_CONVERSATIONAL_ORDER_FIELDS = ["name", "address", "phone", "payment_method"]
+# REQUIRED_FIELDS de tu código original, usado por process_order
+REQUIRED_FIELDS = ["name", "address", "phone", "payment_method"]
 
-# --- Funciones de Catálogo y Matching (Mantener las de la respuesta anterior) ---
-def build_structured_catalog_for_logic(productos_list: list) -> list:
-    # ... (Mantener la implementación exacta de la respuesta anterior)
+
+# --- Nuevas Funciones de Catálogo y Matching (para la lógica de imágenes mejorada) ---
+
+def build_structured_catalog_for_logic_v2(productos_list: list) -> list:
+    """
+    Construye un catálogo detallado para la lógica interna de imágenes.
+    Similar a la versión que desarrollamos, pero nombrada v2 para este contexto.
+    """
     structured_catalog = []
     if not productos_list: return structured_catalog
     for p_data in productos_list:
@@ -36,7 +46,8 @@ def build_structured_catalog_for_logic(productos_list: list) -> list:
                 value_for_matching_parts = [str(v_opt_val).strip().lower() for v_opt_val in opts.values()]
                 catalog_variant_label_parts = [f"{str(k_opt).strip().lower()}:{str(v_opt_val).strip().lower()}" for k_opt, v_opt_val in opts.items()]
                 variants_details.append({
-                    "id": v_data["id"], "display_label": ", ".join(display_label_parts),
+                    "id": v_data["id"], 
+                    "display_label": ", ".join(display_label_parts),
                     "value_for_matching": " ".join(value_for_matching_parts),
                     "catalog_variant_label_for_images": ",".join(catalog_variant_label_parts),
                     "price": v_data.get("price"), "stock": v_data.get("stock"),
@@ -50,111 +61,121 @@ def build_structured_catalog_for_logic(productos_list: list) -> list:
                 "all_product_images_raw": p_data.get("product_images", [])
             })
         except Exception as e:
-            logger.error(f"Error construyendo catálogo: {p_data.get('name', 'ID desc')}: {e}", exc_info=True)
+            logger.error(f"Error v2 construyendo catálogo: {p_data.get('name', 'ID desc')}: {e}", exc_info=True)
     return structured_catalog
 
-def format_catalog_for_llm_context(s_catalog: list) -> list:
-    # ... (Mantener la implementación exacta de la respuesta anterior)
-    llm_catalog_summary = []
-    for p_entry in s_catalog:
-        variants_summary = [f"{v['display_label']} (P: {v.get('price', 'N/A')}, S: {v.get('stock', 'N/A')})" for v in p_entry.get("variants", [])]
-        llm_catalog_summary.append({
-            "name": p_entry["name"], "description": p_entry.get("description", "N/D"),
-            "price_info": f"Base COP {p_entry.get('base_price')}" if p_entry.get('base_price') and not variants_summary else "Ver variantes",
-            "stock_info": f"Base: {p_entry.get('base_stock')}" if p_entry.get('base_stock') and not variants_summary else "Ver variantes",
-            "variants": variants_summary if variants_summary else "Sin variantes específicas.",
-            "images_available": bool(p_entry.get("main_images") or any(v.get("images") for v in p_entry.get("variants",[])) or p_entry.get("all_product_images_raw"))
-        })
-    return llm_catalog_summary
-
-
-def match_target_in_catalog_for_images(s_catalog: list, query: str) -> tuple[dict | None, dict | None]:
-    # ... (Mantener la implementación exacta de la respuesta anterior)
+def match_target_in_catalog_for_images_v2(s_catalog: list, query: str) -> tuple[dict | None, dict | None]:
+    """
+    Busca producto/variante para imágenes en el catálogo estructurado v2.
+    """
     if not query or not s_catalog: return None, None
     target = query.strip().lower()
     for prod in s_catalog:
         p_name_low = prod["name"].lower()
-        if p_name_low in target:
-            if p_name_low == target: return prod, None
-            for var in prod["variants"]:
+        if p_name_low in target: # Si el nombre del producto está en el query
+            if p_name_low == target: return prod, None # Coincidencia exacta del nombre del producto
+            for var in prod["variants"]: # Buscar si también hay una variante
                 if var["value_for_matching"] in target: return prod, var
-            return prod, None
+            return prod, None # Si no se encontró variante específica, devolver solo el producto
+        # Si el query es solo el valor de una variante (ej. "amarillo")
         for var in prod["variants"]:
             if var["value_for_matching"] == target: return prod, var
-    choices = [p["name"].lower() for p in s_catalog] + \
-              [f"{p['name'].lower()} {v['value_for_matching']}" for p in s_catalog for v in p["variants"]] + \
-              [v['value_for_matching'] for p in s_catalog for v in p["variants"]]
-    matches = get_close_matches(target, list(set(choices)), n=1, cutoff=0.65)
-    if matches:
-        match_str = matches[0]
-        for prod in s_catalog:
-            if prod["name"].lower() == match_str: return prod, None
-            for var in prod["variants"]:
-                if f"{prod['name'].lower()} {var['value_for_matching']}" == match_str: return prod, var
-                if var["value_for_matching"] == match_str: return prod, var
+    
+    # Búsqueda difusa simplificada
+    choices = []
+    item_map = {}
+    for prod_idx, prod_entry in enumerate(s_catalog):
+        # Producto
+        prod_name_lower = prod_entry["name"].lower()
+        choices.append(prod_name_lower)
+        item_map[prod_name_lower] = (prod_entry, None)
+        # Variantes
+        for var_idx, var_entry in enumerate(prod_entry.get("variants", [])):
+            var_val_match = var_entry["value_for_matching"]
+            full_name = f"{prod_name_lower} {var_val_match}"
+            choices.append(full_name)
+            item_map[full_name] = (prod_entry, var_entry)
+            if var_val_match not in item_map : # Solo añadir si no colisiona (priorizar nombre completo)
+                choices.append(var_val_match)
+                item_map[var_val_match] = (prod_entry, var_entry)
+
+    unique_choices = list(set(choices))
+    best_matches = get_close_matches(target, unique_choices, n=1, cutoff=0.65) # Ajustar cutoff según sea necesario
+
+    if best_matches:
+        matched_text = best_matches[0]
+        logger.info(f"Coincidencia difusa v2 para imágenes de '{target}': '{matched_text}'")
+        return item_map.get(matched_text, (None, None))
+        
     return None, None
 
-
-# --- Lógica de Manejo de Solicitud de Imágenes ---
-async def handle_image_request_logic(
-    from_number: str, user_raw_text: str, current_history: list, structured_catalog_data: list
-) -> tuple[bool, str | None]: # Devuelve (manejado, mensaje_error_api | None)
+# --- Nueva Lógica de Manejo de Solicitud de Imágenes (Integrada) ---
+async def handle_image_request_logic_v2(
+    from_number: str, user_raw_text: str, current_history: list, structured_catalog_data_v2: list
+) -> tuple[bool, str | None]: # Devuelve (manejado_exitosamente, mensaje_error_api | None)
     try:
-        # ... (Igual que antes, pero ahora devuelve también un mensaje de error si lo hay)
-        catalog_summary_for_llm = [{"name": p["name"], "variants": [v["display_label"] for v in p.get("variants", [])]} for p in structured_catalog_data]
+        catalog_summary_for_llm = [{"name": p["name"], "variants": [v["display_label"] for v in p.get("variants", [])]} for p in structured_catalog_data_v2]
         image_intent_prompt = {
             "user_request": user_raw_text, "available_products_summary": catalog_summary_for_llm,
-            "task": "Analiza 'user_request'. Si pide imágenes/fotos, responde JSON: {\"want_images\": true, \"target\": \"nombre producto/variante\"}. Si no, {\"want_images\": false}. Si el target no es claro, añade 'clarification_needed': 'mensaje'.",
-            "examples": [{"user": "fotos tequila?", "bot_json": {"want_images": True, "target": "tequila"}}, {"user": "foto porfa", "bot_json": {"want_images": True, "target": "producto contexto", "clarification_needed": "¡Claro! ¿De qué producto?"}}]
+            "task": "Analiza 'user_request'. Si el usuario pide imágenes o fotos, responde con JSON: {\"want_images\": true, \"target\": \"nombre del producto o variante relevante\"}. Si no pide imágenes, responde: {\"want_images\": false}. Si pide fotos pero el target es ambiguo (ej: 'muéstrame una foto'), incluye 'clarification_needed': 'mensaje para pedir clarificación'.",
+            "examples": [
+                {"user": "¿Tienes fotos del tequila?", "bot_json": {"want_images": True, "target": "tequila"}},
+                {"user": "Foto porfa", "bot_json": {"want_images": True, "target": "el producto que se estaba discutiendo", "clarification_needed": "¡Claro! ¿De qué producto o variante te gustaría ver la foto? 😊"}},
+                {"user": "cuanto cuesta", "bot_json": {"want_images": False}}
+            ]
         }
+        # Usar una porción más corta del historial para esta detección de intención específica
         llm_input = current_history[-3:] + [{"role": "user", "text": json.dumps(image_intent_prompt, ensure_ascii=False)}]
         
-        logger.info(f"🧠 Gemini (Image Intent) - Enviando solicitud...")
-        llm_response_text = await ask_gemini_with_history(llm_input)
+        logger.info(f"🧠 Gemini (Image Intent V2) - Enviando solicitud...")
+        llm_response_text = await ask_gemini_with_history(llm_input) # USA TU CLIENTE GEMINI ACTUALIZADO
 
         if isinstance(llm_response_text, str) and (llm_response_text.startswith("GEMINI_API_ERROR:") or llm_response_text.startswith("GEMINI_RESPONSE_ISSUE:")):
-            logger.error(f"Error/Problema de Gemini (Image Intent): {llm_response_text}")
-            return False, llm_response_text 
+            logger.error(f"Error/Problema de Gemini (Image Intent V2): {llm_response_text}")
+            return False, llm_response_text # Devolver el mensaje de error de la API
 
-        logger.info(f"🧠 Gemini (Image Intent) - Raw Response: {llm_response_text}")
+        logger.info(f"🧠 Gemini (Image Intent V2) - Raw Response: {llm_response_text}")
         json_match = re.search(r"\{[\s\S]*\}", llm_response_text)
         if not json_match:
-            logger.warning("No JSON en respuesta LLM para intención de imagen. Asumiendo NO quiere imágenes.")
-            return False, None
+            logger.warning("No JSON en respuesta LLM para V2 intención de imagen. Asumiendo NO quiere imágenes.")
+            return False, None 
         
         try:
             action = json.loads(json_match.group())
         except json.JSONDecodeError:
-            logger.error(f"Error decodificando JSON intención imagen. Respuesta: {json_match.group()}")
+            logger.error(f"Error decodificando JSON V2 intención imagen. Respuesta: {json_match.group()}")
             return False, None
 
         if not action.get("want_images"):
-            return False, None
+            logger.info("V2: Usuario no quiere imágenes según LLM.")
+            return False, None # No quiere imágenes, no se maneja aquí, no es un error de API.
 
         if action.get("clarification_needed") and isinstance(action["clarification_needed"], str):
-            send_whatsapp_message(from_number, action["clarification_needed"])
-            return True, None
+            send_whatsapp_message(from_number, action["clarification_needed"]) # SIN await
+            logger.info(f"V2: Enviada solicitud de clarificación para imágenes: {action['clarification_needed']}")
+            return True, None # Se manejó pidiendo clarificación
 
         target_description = action.get("target")
         if not target_description or not isinstance(target_description, str):
-            send_whatsapp_message(from_number, "¡Claro! Quieres fotos. ¿De qué producto o variante te gustaría verlas? 🤔")
-            return True, None
+            logger.warning("V2: LLM indicó 'want_images' pero sin 'target' válido.")
+            send_whatsapp_message(from_number, "¡Entendido! Quieres ver fotos. ¿Podrías decirme de qué producto o variante te gustaría verlas, por favor? 🤔") # SIN await
+            return True, None 
 
-        matched_product_cat_obj, matched_variant_cat_obj = match_target_in_catalog_for_images(
-            structured_catalog_data, target_description
+        matched_product_cat_obj, matched_variant_cat_obj = match_target_in_catalog_for_images_v2(
+            structured_catalog_data_v2, target_description
         )
 
         if not matched_product_cat_obj:
-            send_whatsapp_message(from_number, f"Lo siento, no encontré '{target_description}' para mostrarte imágenes. 😔")
-            return True, None
+            send_whatsapp_message(from_number, f"Lo siento, no encontré '{target_description}' en nuestro catálogo para mostrarte imágenes. 😔") # SIN await
+            logger.info(f"V2: Producto/variante '{target_description}' no encontrado para imágenes.")
+            return True, None 
 
         image_urls_to_send = []
         display_name_for_caption = matched_product_cat_obj["name"]
-        # ... (Lógica de recopilar URLs igual que antes)
         if matched_variant_cat_obj:
             display_name_for_caption = f"{matched_product_cat_obj['name']} ({matched_variant_cat_obj['display_label']})"
             image_urls_to_send.extend(matched_variant_cat_obj.get("images", []))
-            if not image_urls_to_send:
+            if not image_urls_to_send: # Fallback
                 variant_id_to_match = matched_variant_cat_obj["id"]
                 variant_label_to_match_img = matched_variant_cat_obj["catalog_variant_label_for_images"].lower()
                 for img_obj in matched_product_cat_obj.get("all_product_images_raw", []):
@@ -163,32 +184,32 @@ async def handle_image_request_logic(
                         if img_obj["url"] not in image_urls_to_send: image_urls_to_send.append(img_obj["url"])
         if not image_urls_to_send:
             image_urls_to_send.extend(matched_product_cat_obj.get("main_images", []))
-            image_urls_to_send = list(set(image_urls_to_send))
-
+        image_urls_to_send = list(set(image_urls_to_send)) # Únicos
 
         if not image_urls_to_send:
-            send_whatsapp_message(from_number, f"No tenemos imágenes para *{display_name_for_caption}* en este momento. ¿Te ayudo con algo más?")
-            return True, None
+            send_whatsapp_message(from_number, f"No tenemos imágenes disponibles para *{display_name_for_caption}* en este momento. ¿Te puedo ayudar con algo más?") # SIN await
+            logger.info(f"V2: No se encontraron URLs de imágenes para '{display_name_for_caption}'.")
+            return True, None 
 
-        send_whatsapp_message(from_number, f"¡Claro! Aquí tienes las imágenes de *{display_name_for_caption}*:")
+        send_whatsapp_message(from_number, f"¡Claro! Aquí tienes las imágenes de *{display_name_for_caption}*:") # SIN await
         for img_url in image_urls_to_send:
             try:
-                send_whatsapp_image(from_number, img_url, caption=display_name_for_caption)
+                send_whatsapp_image(from_number, img_url, caption=display_name_for_caption) # SIN await
             except Exception as e_img:
-                logger.error(f"❌ Error enviando imagen {img_url}: {e_img}", exc_info=True)
-        return True, None # Manejado exitosamente
+                logger.error(f"❌ V2 Error enviando imagen {img_url}: {e_img}", exc_info=True)
+        return True, None # Manejado exitosamente (se enviaron imágenes o se notificó)
     except Exception as e_img_handler:
-        logger.error(f"⚠️ Error en handle_image_request_logic: {e_img_handler}", exc_info=True)
-        return False, f"GEMINI_API_ERROR: Error interno procesando solicitud de imagen ({type(e_img_handler).__name__})." # Devolver error si falla
+        logger.error(f"⚠️ Error crítico en handle_image_request_logic_v2: {e_img_handler}", exc_info=True)
+        return False, f"GEMINI_API_ERROR: Error interno procesando imágenes ({type(e_img_handler).__name__})."
 
 
-# --- Flujo Principal de Mensajes ---
+# --- Flujo Principal de Mensajes (Basado en tu código original) ---
 async def handle_user_message(body: dict):
-    gemini_api_error_occurred_message = None # Para rastrear si hubo error de API en algún punto
+    gemini_api_error_msg_for_user = None # Para almacenar un mensaje de error de API si ocurre
     try:
         entry = body.get("entry", [{}])[0]
         changes = entry.get("changes", [{}])[0]
-        value_data = changes.get("value", {})
+        value_data = changes.get("value", {}) # Añadido para obtener el timestamp del mensaje
         messages = value_data.get("messages")
 
         if not messages:
@@ -197,203 +218,206 @@ async def handle_user_message(body: dict):
             return
 
         msg = messages[0]
-        user_raw_text = msg.get("text", {}).get("body", "").strip()
+        raw_text = msg.get("text", {}).get("body", "").strip()
         from_number = msg.get("from")
         
         msg_timestamp_unix = msg.get("timestamp")
         message_time = datetime.fromtimestamp(int(msg_timestamp_unix), tz=timezone.utc) if msg_timestamp_unix else datetime.now(timezone.utc)
 
-        if not user_raw_text or not from_number:
-            logger.warning("Mensaje sin texto o remitente. Ignorando.")
-            return
 
-        logger.info(f"Mensaje de {from_number} ({message_time.isoformat()}): '{user_raw_text}'")
+        if not raw_text or not from_number:
+            return
 
         current_user_history = user_histories.setdefault(from_number, [])
         current_user_history.append({
             "role": "user",
-            "text": user_raw_text,
-            "time": message_time.isoformat()
+            "text": raw_text,
+            "time": message_time.isoformat() # Usar message_time
         })
-        await save_message_to_supabase(from_number, "user", user_raw_text)
+        await save_message_to_supabase(from_number, "user", raw_text) # Sin timestamp explícito
 
-        productos_db_data = await get_all_products()
-        if not productos_db_data:
-            logger.error("CRÍTICO: No se pudieron obtener productos.")
-            send_whatsapp_message(from_number, "Lo siento, tenemos problemas para acceder al catálogo ahora. 🛠️ Intenta más tarde.")
+        productos_db = await get_all_products()
+        if not productos_db:
+            logger.warning("No se pudieron obtener los productos desde la DB.")
+            # No enviar mensaje al usuario aquí, dejar que el flujo general lo maneje si es necesario
             return
-        
-        s_catalog_logic = build_structured_catalog_for_logic(productos_db_data)
 
-        # 1. Intentar manejar como solicitud de imagen
-        # handle_image_request_logic ahora devuelve (manejado, mensaje_error_api | None)
-        image_request_was_handled, img_api_error_msg = await handle_image_request_logic(
-            from_number, user_raw_text, current_user_history, s_catalog_logic
+        # --- INICIO DE LA INTEGRACIÓN DE MANEJO DE IMÁGENES ---
+        # Usar las nuevas funciones de catálogo para la lógica de imágenes
+        s_catalog_for_images = build_structured_catalog_for_logic_v2(productos_db)
+        
+        image_request_handled, api_error_from_images = await handle_image_request_logic_v2(
+            from_number, raw_text, current_user_history, s_catalog_for_images
         )
 
-        if img_api_error_msg: # Si hubo un error de API al intentar procesar imágenes
-            gemini_api_error_occurred_message = img_api_error_msg # Guardar para posible mensaje final
-            # No necesariamente retornamos, el flujo general podría aún funcionar o dar un error más genérico.
+        if api_error_from_images: # Si hubo un error de API al intentar manejar imágenes
+            gemini_api_error_msg_for_user = "Lo siento, estoy teniendo un problema con el asistente de IA en este momento. 🛠️ Intenta más tarde."
+            if "overloaded" in api_error_from_images or "ocupados" in api_error_from_images:
+                gemini_api_error_msg_for_user = "Nuestros sistemas de IA están un poco ocupados ahora. 😅 Por favor, intenta en unos minutos."
+            # No retornamos todavía, el flujo de pedido general podría aún funcionar si el error fue solo en el flujo de imágenes.
+            # Pero si el flujo general también falla, este mensaje se usará.
 
-        if image_request_was_handled: # Si la lógica de imagen se completó (envió o dijo que no hay)
-            logger.info("Solicitud de imagen manejada por handle_image_request_logic. Finalizando.")
-            return
+        if image_request_handled:
+            logger.info("Solicitud de imagen manejada. Finalizando.")
+            return 
+        # --- FIN DE LA INTEGRACIÓN DE MANEJO DE IMÁGENES ---
 
-        # 2. Si no fue una solicitud de imagen manejada, o si falló la detección pero no críticamente,
-        #    procesar como conversación general/pedido
-        logger.info(f"Procesando como mensaje general/pedido para {from_number}")
-
-        catalog_for_llm_prompt = format_catalog_for_llm_context(s_catalog_logic)
+        # --- LÓGICA DE PEDIDO (BASADA EN TU CÓDIGO ORIGINAL) ---
+        # Funciones de catálogo y matching de tu código original (usadas para el prompt de pedido)
+        # `extract_labels` ya no es necesaria si `build_catalog_original` no la usa.
+        # `choice_map` tampoco parece usarse en el flujo de pedido.
         
-        # ---- INSTRUCCIONES PARA EL LLM (REFINADAS PARA CONTROL DE FLUJO) ----
-        order_taking_instructions = (
-            f"Eres 'VendiBot', vendedor experto de 'Licores El Roble'. Amigable, colombiano, conversacional, emojis. Tu meta es ayudar y concretar ventas.\n\n"
-            f"CLIENTE DICE: \"{user_raw_text}\"\n\n"
-            f"CATÁLOGO (Precios COP, stock indicado. Si agotado, informa y sugiere alternativa del catálogo):\n{json.dumps(catalog_for_llm_prompt, indent=2, ensure_ascii=False)}\n\n"
-            f"**== TU PROCESO DE VENTA ==**\n"
-            f"**ESTADO ACTUAL (Determina en qué estado estás basado en el historial y el último mensaje del cliente. Si no hay un pedido en curso, estás en 'Consultando'):**\n"
-            f"   - 'Consultando': El cliente está preguntando, explorando. Ayúdalo, da información.\n"
-            f"   - 'ArmandoCarrito': El cliente ha expresado intención de comprar al menos un producto. Ya has confirmado ítems.\n"
-            f"   - 'PidiendoDatos': El cliente dijo que NO quiere añadir más productos y está listo para dar sus datos.\n"
-            f"   - 'ConfirmandoPedidoFinal': Ya tienes todos los datos del cliente y el carrito, y le estás presentando el resumen final para su 'sí'.\n\n"
+        def build_catalog_original_for_prompt(productos_param): # Renombrada para evitar colisión
+            catalog_lines = []
+            for p in productos_param:
+                try:
+                    variants = p.get("product_variants") or []
+                    if not variants:
+                        line = f"- {p['name']}: COP {p.get('price',0)} (stock {p.get('stock',0)})"
+                    else:
+                        line = f"- {p['name']}:"
+                        opts = []
+                        for v_item in variants:
+                            price = v_item.get("price", p.get("price",0))
+                            stock = v_item.get("stock", "N/A")
+                            options_str = ",".join(f"{k}:{v2}" for k, v2 in v_item.get("options", {}).items())
+                            opts.append(f"    • {options_str} — COP {price} (stock {stock})")
+                        line += "\n" + "\n".join(opts)
 
-            f"**INSTRUCCIONES SEGÚN EL ESTADO:**\n"
-            f"1.  **Si ESTADO = 'Consultando':**\n"
-            f"    - Responde preguntas, da info de productos (descripción, precio, variantes, stock). Si el catálogo dice `images_available: true`, menciona que hay fotos. Si preguntan por algo que no tienes, di que no está disponible y sugiere ALGO SIMILAR DEL CATÁLOGO amablemente.\n"
-            f"    - Si el cliente expresa intención de compra (ej: 'quiero X', 'me llevo Y'): Confirma el/los producto(s), cantidad (asume 1 si no se especifica pero pregunta si quiere más), y precio unitario. Calcula el subtotal. Pasa a ESTADO = 'ArmandoCarrito'.\n"
-            f"2.  **Si ESTADO = 'ArmandoCarrito':**\n"
-            f"    - **RECOMENDACIÓN (SOLO UNA VEZ, SUTIL):** Si acabas de añadir el primer o segundo ítem al carrito, puedes decir algo como: '¡Buena elección! Para acompañar tu [producto principal], ¿qué tal un [producto complementario del catálogo]? O si prefieres, podemos seguir.'\n"
-            f"    - **Pregunta '¿Deseas añadir algo más a tu pedido?'**\n"
-            f"    - Si dice SÍ o pide otro producto: Añádelo, recalcula subtotal. Mantente en ESTADO = 'ArmandoCarrito' y repite la pregunta de '¿Algo más?'.\n"
-            f"    - **Si dice NO (ej: 'no, solo eso', 'eso es todo', 'nada más'):** ¡Perfecto! Informa el costo de envío (COP 5.000) y el TOTAL FINAL. Pasa a ESTADO = 'PidiendoDatos' y empieza a pedir el primer dato.\n"
-            f"3.  **Si ESTADO = 'PidiendoDatos':**\n"
-            f"    - PIDE LOS DATOS SECUENCIALMENTE (uno por uno, esperando respuesta antes de pedir el siguiente). NO los pidas todos de golpe. Los datos son: Nombre completo, Dirección detallada (con ciudad/barrio), Teléfono de contacto, Método de pago (Nequi, Daviplata, Bancolombia, o contraentrega en efectivo en [tu ciudad/área si aplica]).\n"
-            f"    - Revisa el historial para no pedir datos ya dados. Si ya tienes un dato, confírmalo.\n"
-            f"    - Cuando tengas todos los datos, pasa a ESTADO = 'ConfirmandoPedidoFinal'.\n"
-            f"4.  **Si ESTADO = 'ConfirmandoPedidoFinal':**\n"
-            f"    - Resume TODO el pedido: productos (nombre, cantidad, precio unitario), subtotal, envío, TOTAL A PAGAR, y todos los datos de envío del cliente.\n"
-            f"    - Pregunta CLARAMENTE: '¿Está todo correcto para confirmar tu pedido? Por favor, dime 'sí' o 'confirmo'.'\n"
-            f"    - **SI EL USUARIO CONFIRMA ('sí', 'ok', 'confirmo', 'listo'):** Tu respuesta DEBE terminar con el bloque JSON exacto. El texto conversacional ANTES del JSON debe ser una confirmación entusiasta. Ej: '¡Excelente! Tu pedido ha sido confirmado y ya lo estamos preparando. ¡Muchas gracias por tu compra en Licores El Roble! 🎉'\n"
-            f"      ```json\n"
-            f"      {{\"order_details\":{{\"name\":\"NOMBRE_COMPLETO\",\"address\":\"DIRECCION_DETALLADA\",\"phone\":\"TELEFONO_CONTACTO\",\"payment_method\":\"METODO_PAGO_ELEGIDO\",\"products\":[{{\"name\":\"NOMBRE_PRODUCTO_1\",\"quantity\":CANTIDAD_NUMERICA,\"price\":PRECIO_UNITARIO_NUMERICO}}],\"total\":TOTAL_PEDIDO_NUMERICO}}}}\n"
-            f"      ```\n"
-            f"    - **SI EL USUARIO NO CONFIRMA o pide cambios: NO INCLUYAS EL JSON.** Vuelve al estado apropiado (ej. 'ArmandoCarrito' si quiere cambiar productos, o 'PidiendoDatos' si un dato está mal).\n\n"
-            f"**GENERAL:**\n"
-            f"- Si pide fotos y no se manejó antes, di: 'Claro, ¿de qué producto/variante quieres ver fotos?'. No generes JSON para esto.\n"
-            f"- Siempre sé amable. Si no entiendes, pide clarificación."
+                    # No añadir info de imágenes aquí si ya se manejó
+                    catalog_lines.append(line)
+                except Exception as e:
+                    logger.warning(f"Error en build_catalog_original_for_prompt para {p.get('name')}: {e}")
+            return "🛍️ Catálogo actual:\n\n" + "\n\n".join(catalog_lines)
+
+        # Instrucciones para el LLM (de tu código original)
+        # Ajustar el prompt para que NO intente manejar imágenes aquí, ya se hizo.
+        # Y para que use `build_catalog_original_for_prompt`.
+        order_context_for_llm = build_catalog_original_for_prompt(productos_db)
+        instrucciones_pedido_original = (
+            f"MENSAJE DEL USUARIO: \"{raw_text}\"\n\n"
+            f"{order_context_for_llm}\n\n"
+            "INSTRUCCIONES PARA EL BOT (VENDEDOR AMIGABLE):\n"
+            "1. Si un producto no está disponible (stock 0 o N/A), informa y sugiere una alternativa del catálogo si es posible.\n"
+            "2. Si hay intención de compra, detalla en tu respuesta: Productos, cantidad y precio unitario. Calcula un subtotal. Informa que el envío cuesta COP 5.000 y añádelo al total.\n"
+            "3. Pregunta SIEMPRE '¿Deseas algo más?' después de confirmar un ítem o el carrito.\n"
+            "4. **SOLO si el usuario responde 'no', 'solo eso', 'nada más' o similar a '¿Deseas algo más?', PROCEDE A PEDIR LOS DATOS DE ENVÍO**: Nombre completo, dirección detallada, teléfono de contacto y método de pago (Nequi, Daviplata, Bancolombia, contraentrega en [tu ciudad]). Pide estos datos UNO POR UNO.\n"
+            "5. Cuando tengas TODOS los datos del paso 4 y el carrito esté armado, resume TODO el pedido (productos, total, datos de envío) y pregunta: '¿Está todo correcto para confirmar tu pedido?'.\n"
+            "6. **SI EL USUARIO CONFIRMA EL RESUMEN ('sí', 'ok', 'confirmo'), ENTONCES Y SÓLO ENTONCES**, tu respuesta DEBE terminar con este bloque JSON EXACTO (sin 'json' antes, ni comentarios):\n"
+            "   ```json\n"
+            "   {{\"order_details\":{{\"name\":\"NOMBRE_COMPLETO\",\"address\":\"DIRECCION_DETALLADA\",\"phone\":\"TELEFONO_CONTACTO\",\"payment_method\":\"METODO_PAGO_ELEGIDO\",\"products\":[{{\"name\":\"NOMBRE_PRODUCTO_1\",\"quantity\":CANTIDAD_NUMERICA,\"price\":PRECIO_UNITARIO_NUMERICO}}],\"total\":TOTAL_PEDIDO_NUMERICO}}}}\n"
+            "   ```\n"
+            "   Tu texto conversacional ANTES del JSON debe ser una confirmación. Ej: '¡Perfecto! Pedido confirmado. 🎉'\n"
+            "7. Si el usuario solo pregunta o conversa, responde amablemente sin forzar la venta. Usa emojis.\n"
+            "8. **NO intentes mostrar imágenes ni procesar solicitudes de imágenes aquí. Eso ya se manejó o no se pidió.**"
+            "9. **Recomendación Sutil**: Después de que el usuario añada el primer producto y ANTES de preguntar '¿Deseas algo más?', puedes sugerir UN producto complementario del catálogo de forma sutil. Ejemplo: '¡Buena elección! Para acompañar tu [producto], ¿qué tal un [otro producto]? O si prefieres, seguimos.' SOLO UNA VEZ POR PEDIDO."
         )
-        # ---- FIN INSTRUCCIONES PARA EL LLM ----
 
-        llm_general_history = current_user_history[-8:] # Enviar últimos 4 intercambios (user/model)
-        llm_input_general_conv = llm_general_history + [{"role": "user", "text": order_taking_instructions}]
+        # Obtener respuesta de Gemini para el pedido
+        history_for_order_llm = current_user_history[-8:] # Usar historial relevante
+        llm_response_order = await ask_gemini_with_history(history_for_order_llm + [{"role": "user", "text": instrucciones_pedido_original}])
 
-        logger.info(f"🧠 Gemini (General/Order) - Enviando solicitud...")
-        llm_response_general = await ask_gemini_with_history(llm_input_general_conv)
+        if isinstance(llm_response_order, str) and (llm_response_order.startswith("GEMINI_API_ERROR:") or llm_response_order.startswith("GEMINI_RESPONSE_ISSUE:")):
+            logger.error(f"Error de Gemini (Order Processing): {llm_response_order}")
+            # Usar el error de API de la etapa de imagen si existió, sino el actual
+            final_api_error_msg = gemini_api_error_msg_for_user if gemini_api_error_msg_for_user else \
+                                  ("Lo siento, el asistente de IA está teniendo problemas. 🛠️ Intenta más tarde." if "overloaded" not in llm_response_order else \
+                                   "Nuestros sistemas de IA están ocupados. 😅 Intenta en unos minutos.")
+            
+            send_whatsapp_message(from_number, final_api_error_msg) # SIN await
+            # Guardar este mensaje de error
+            model_err_time = datetime.now(timezone.utc)
+            current_user_history.append({"role": "model", "text": final_api_error_msg, "time": model_err_time.isoformat()})
+            await save_message_to_supabase(from_number, "model", final_api_error_msg)
+            return
 
-        if isinstance(llm_response_general, str) and (llm_response_general.startswith("GEMINI_API_ERROR:") or llm_response_general.startswith("GEMINI_RESPONSE_ISSUE:")):
-            logger.error(f"Error/Problema de Gemini (General/Order): {llm_response_general}")
-            gemini_api_error_occurred_message = llm_response_general # Guardar para mensaje final
-            # El flujo continuará para ver si hay un mensaje de error guardado de la etapa de imagen, o se usará este.
-        else:
-            logger.info(f"🧠 Gemini (General/Order) - Raw Response: {llm_response_general}")
+        logger.info(f"🧠 Gemini (Order Processing) - Raw Response: {llm_response_order}")
+
+        # Extraer datos del pedido y texto limpio de la respuesta del LLM
+        # `order_data_payload` debería ser el contenido de `order_details` si está presente
+        order_data_payload, clean_text_for_user = extract_order_data(llm_response_order)
+        model_response_time = datetime.now(timezone.utc) # Timestamp para la respuesta del modelo
+
+        # Enviar respuesta del LLM al usuario (si hay texto)
+        if clean_text_for_user and clean_text_for_user.strip():
+            send_whatsapp_message(from_number, clean_text_for_user) # SIN await
+            current_user_history.append({
+                "role": "model",
+                "text": clean_text_for_user,
+                "time": model_response_time.isoformat()
+            })
+            await save_message_to_supabase(from_number, "model", clean_text_for_user)
+        elif gemini_api_error_msg_for_user: # Si hubo error en imagen y no hubo respuesta de pedido
+             send_whatsapp_message(from_number, gemini_api_error_msg_for_user) # SIN await
+             # Guardar este error
+             model_err_time = datetime.now(timezone.utc)
+             current_user_history.append({"role": "model", "text": gemini_api_error_msg_for_user, "time": model_err_time.isoformat()})
+             await save_message_to_supabase(from_number, "model", gemini_api_error_msg_for_user)
+             return
+
+
+        # Lógica de tu código original para recomendaciones y `process_order`
+        # `order_data_payload` es lo que `extract_order_data` devuelve como datos del pedido.
+        # Debe ser el diccionario contenido en `order_details`.
         
-        # Si hubo un error de API en la llamada general, y no se pudo obtener respuesta
-        if gemini_api_error_occurred_message and not (isinstance(llm_response_general, str) and llm_response_general.strip()):
-             # Determinar el mensaje de error más específico para el usuario
-            final_error_msg_to_user = "Lo siento, estoy experimentando algunas dificultades técnicas en este momento. 🛠️ Por favor, inténtalo de nuevo en unos minutos."
-            if "overloaded" in gemini_api_error_occurred_message or "ocupados" in gemini_api_error_occurred_message or "alta demanda" in gemini_api_error_occurred_message:
-                 final_error_msg_to_user = "Nuestros sistemas de IA están un poco ocupados en este momento. 😅 ¿Podrías intentarlo de nuevo en un par de minutos, por favor?"
-            # ... (más condiciones para otros tipos de errores de gemini_api_error_occurred_message)
-            
-            send_whatsapp_message(from_number, final_error_msg_to_user)
-            model_error_time = datetime.now(timezone.utc)
-            current_user_history.append({"role": "model", "text": final_error_msg_to_user, "time": model_error_time.isoformat()})
-            await save_message_to_supabase(from_number, "model", final_error_msg_to_user)
-            return
+        actual_order_details = None
+        if order_data_payload and isinstance(order_data_payload, dict):
+            if "order_details" in order_data_payload and isinstance(order_data_payload["order_details"], dict):
+                actual_order_details = order_data_payload["order_details"]
+            # Si extract_order_data ya devuelve el payload de order_details directamente:
+            elif all(k in order_data_payload for k in ["name", "products", "total"]): 
+                actual_order_details = order_data_payload
+        
+        # Sección de recomendaciones (como en tu código original)
+        # Se activa si hay un JSON de pedido, pero ANTES de `process_order` si quieres que sea parte del "¿Algo más?".
+        # Sin embargo, para que sea MENOS fastidioso, la moví a DESPUÉS de que el pedido es CREADO.
+        # El prompt ya tiene la instrucción de recomendar sutilmente UNA VEZ.
 
-        # Procesar la respuesta normal del LLM
-        order_data_for_processing, llm_text_response_to_user = extract_order_data(llm_response_general)
-        model_response_time = datetime.now(timezone.utc)
+        if actual_order_details: # Si el LLM generó el JSON `order_details`
+            logger.info(f"🛍️ Payload de pedido para procesar: {json.dumps(actual_order_details, indent=2)}")
+            # `process_order` se encarga de la validación final y guardado.
+            result = await process_order(from_number, actual_order_details)
+            status = result.get("status")
 
-        if llm_text_response_to_user and llm_text_response_to_user.strip():
-            send_whatsapp_message(from_number, llm_text_response_to_user)
-            current_user_history.append({"role": "model", "text": llm_text_response_to_user, "time": model_response_time.isoformat()})
-            await save_message_to_supabase(from_number, "model", llm_text_response_to_user)
-        elif gemini_api_error_occurred_message: 
-            # Si la llamada a imagen tuvo error Y la llamada general no produjo texto, enviar el error de imagen.
-            # (Esto es un fallback, idealmente la llamada general siempre produce texto o un error más específico)
-            send_whatsapp_message(from_number, "Hubo un problema con el asistente de IA. Intenta de nuevo.")
-            # ... (guardar este error en historial/DB)
-            return
-
-        # Procesar pedido
-        final_order_payload = None
-        if order_data_for_processing and isinstance(order_data_for_processing, dict):
-            # ... (lógica para obtener final_order_payload igual que antes) ...
-            if "order_details" in order_data_for_processing and isinstance(order_data_for_processing["order_details"], dict):
-                final_order_payload = order_data_for_processing["order_details"]
-            elif all(k in order_data_for_processing for k in ["name", "products", "total"]): 
-                final_order_payload = order_data_for_processing
-
-
-        if final_order_payload:
-            logger.info(f"🛍️ Payload de pedido para procesar: {json.dumps(final_order_payload, indent=2)}")
-            result_order_processing = await process_order(from_number, final_order_payload)
-            status_from_processing = result_order_processing.get("status")
-            
-            # --- MANEJO DE STATUS DE PROCESS_ORDER (COMO EN TU services/orders.py) ---
-            if status_from_processing == "missing":
-                missing_fields = result_order_processing.get("fields", [])
-                campos_str = ", ".join([f.replace('_',' ').capitalize() for f in missing_fields])
-                # Este mensaje lo envía process_order o el LLM ya debería haber pedido estos datos.
-                # Si process_order devuelve "missing", es porque el JSON del LLM no fue suficiente
-                # para la lógica interna de process_order (que también puede tener user_pending_data).
-                # El LLM debería haber sido instruido para obtener todos los datos.
-                # Aquí podemos reforzar si process_order lo devuelve.
-                send_whatsapp_message(from_number, f"📋 ¡Uy! Parece que al sistema le faltan estos datos para tu pedido: {campos_str}. ¿Podrías confirmarlos o proporcionarlos de nuevo, por favor?")
-            elif status_from_processing == "created":
-                logger.info(f"✅ Pedido CREADO para {from_number} vía process_order.")
-                # El LLM ya envió el mensaje de "Pedido confirmado..."
-                # Aquí es donde se hace la recomendación de productos UNA VEZ.
-                products_ordered = final_order_payload.get("products", [])
-                if products_ordered: # Solo si hay productos en el pedido confirmado
-                    # Usar get_recommended_products de tu products.py
-                    # Esta función espera una lista de productos del pedido actual.
-                    # Asegúrate que `products_ordered` tenga el formato que espera `get_recommended_products`.
-                    # Ej: `[{"name": "Producto A", "quantity": 1, "price": 100}, ...]`
-                    recommendations = await get_recommended_products(products_ordered) 
+            # Mensajes según el status de `process_order` (de tu código original)
+            if status == "missing":
+                campos = "\n".join(f"- {f.replace('_',' ')}" for f in result.get("fields", []))
+                send_whatsapp_message(from_number, f"📋 ¡Casi! Para tu pedido faltan: {campos}. ¿Podrías indicarlos?") # SIN await
+            elif status == "created":
+                # El LLM ya envió "Pedido confirmado". Aquí la recomendación post-pedido.
+                logger.info(f"✅ Pedido CREADO para {from_number} por process_order.")
+                products_in_final_order = actual_order_details.get("products", [])
+                if products_in_final_order:
+                    recommendations = await get_recommended_products(products_in_final_order)
                     if recommendations:
-                        rec_text_parts = [f"  - {r['name']} (COP {r.get('price', 0):,})" for r in recommendations]
-                        # Enviar como un mensaje separado para no interrumpir la confirmación del pedido.
-                        send_whatsapp_message(from_number, 
-                            f"✨ ¡Ya que estamos! Para complementar tu pedido, también te podrían interesar:\n"
-                            f"{chr(10).join(rec_text_parts)}\n\n"
-                            "Si algo te llama la atención para una próxima compra, ¡me avisas! 😉"
-                        )
-            elif status_from_processing == "updated":
-                logger.info(f"♻️ Pedido ACTUALIZADO para {from_number} vía process_order.")
-                # El LLM ya debería haber enviado un mensaje apropiado.
-            elif status_from_processing == "error":
-                error_detail = result_order_processing.get('error', 'Error desconocido al procesar el pedido.')
-                logger.error(f"❌ Error desde process_order para {from_number}: {error_detail}")
-                send_whatsapp_message(from_number, "¡Ups! Tuvimos un inconveniente técnico al registrar tu pedido en nuestro sistema final. 🛠️ Un asesor se pondrá en contacto contigo si es necesario. ¡Gracias por tu paciencia!")
-            else: # Estado no manejado o inesperado
-                logger.warning(f"⚠️ Estado no manejado de process_order: '{status_from_processing}' para {from_number}")
+                        rec_texts = [f"- {r['name']} (COP {r.get('price', 0):,})" for r in recommendations]
+                        send_whatsapp_message(from_number, f"✨ ¡Para tu próxima compra! También te podrían gustar:\n{chr(10).join(rec_texts)}\n¡Avísame si te interesa alguno! 😉") # SIN await
+            elif status == "updated":
+                logger.info(f"♻️ Pedido ACTUALIZADO para {from_number} por process_order.")
+                # El LLM debería haber manejado el mensaje de actualización.
+            elif status == "error":
+                logger.error(f"❌ Error desde process_order: {result.get('error', 'Desconocido')}")
+                send_whatsapp_message(from_number, "Tuvimos un problema al guardar tu pedido en el sistema. 🛠️ Por favor, intenta de nuevo o contacta a un asesor.") # SIN await
+            else:
+                logger.warning(f"⚠️ Estado inesperado de process_order: {status}. Resultado: {result}")
         
-        elif not (llm_text_response_to_user and llm_text_response_to_user.strip()) and not gemini_api_error_occurred_message:
-            # Si no hubo JSON de pedido, ni texto conversacional, Y TAMPOCO hubo un error de API previo
-            logger.error(f"LLM no proporcionó respuesta útil (ni texto, ni JSON, ni error API previo) para: '{user_raw_text}'")
-            send_whatsapp_message(from_number, "¡Uy! Parece que me enredé un poquito con tu último mensaje. 😅 ¿Podrías intentar decírmelo de otra forma, porfa?")
+        # Si no hubo `actual_order_details` (el LLM no generó el JSON de pedido) Y
+        # no hubo texto de respuesta del LLM Y no hubo un error de API previo que ya se manejó.
+        elif not (clean_text_for_user and clean_text_for_user.strip()) and not gemini_api_error_msg_for_user:
+            logger.error(f"LLM no proporcionó respuesta útil (ni texto, ni JSON de pedido, ni error API previo) para: '{raw_text}'")
+            send_whatsapp_message(from_number, "¡Uy! Parece que me enredé un poquito. 😅 ¿Podrías decírmelo de otra forma, porfa?")
+
 
     except Exception as e_global:
         logger.critical(f"❌ [ERROR CRÍTICO GLOBAL en handle_user_message]: {e_global}", exc_info=True)
-        final_fallback_message = gemini_api_error_occurred_message if gemini_api_error_occurred_message \
-                               else "¡Ups! Algo no salió bien de mi lado y no pude procesar tu solicitud. 🤖 Un técnico ya fue notificado. Por favor, intenta de nuevo en un momento."
+        final_fallback_msg = gemini_api_error_msg_for_user if gemini_api_error_msg_for_user else \
+                             "¡Ups! Algo no salió bien de mi lado. 🤖 Un técnico fue notificado. Intenta en un momento."
         try:
-            send_whatsapp_message(from_number, final_fallback_message)
-            model_fallback_time = datetime.now(timezone.utc)
-            current_user_history = user_histories.setdefault(from_number, [])
-            current_user_history.append({"role": "model", "text": final_fallback_message, "time": model_fallback_time.isoformat()})
-            await save_message_to_supabase(from_number, "model", final_fallback_message)
-        except Exception as e_send_fallback:
-            logger.error(f"Falló el envío del mensaje de fallback de error global a {from_number}: {e_send_fallback}")
+            send_whatsapp_message(from_number, final_fallback_msg) # SIN await
+            # Guardar este error
+            model_fb_time = datetime.now(timezone.utc)
+            current_user_history = user_histories.setdefault(from_number, []) # Asegurar que exista
+            current_user_history.append({"role": "model", "text": final_fallback_msg, "time": model_fb_time.isoformat()})
+            await save_message_to_supabase(from_number, "model", final_fallback_msg)
+        except Exception as e_send_fb:
+            logger.error(f"Falló el envío del mensaje de fallback global a {from_number}: {e_send_fb}")
