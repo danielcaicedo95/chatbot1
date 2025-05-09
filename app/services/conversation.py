@@ -43,9 +43,7 @@ async def handle_user_message(body: dict):
         if not productos:
             return  # No se informa al usuario del error
         
-        handled = await handle_image_request()
-        if handled:
-            return
+        
 
 
         def extract_labels(obj):
@@ -194,6 +192,10 @@ async def handle_user_message(body: dict):
 
                 if not action.get("want_images"):
                     return False
+                
+                handled = await handle_image_request()
+                if handled:
+                    return
 
                 prod, var = match_target_in_catalog(catalog, productos, action.get("target", ""))
                 if not prod:
