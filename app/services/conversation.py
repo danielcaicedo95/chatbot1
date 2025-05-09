@@ -189,21 +189,32 @@ async def handle_user_message(body: dict):
                     raise ValueError("No se encontró JSON en la respuesta del modelo.")
                 action = json.loads(match.group())
 
-
                 if not action.get("want_images"):
                     return False
-                
-                handled = await handle_image_request()
-                if handled:
-                    return
 
                 prod, var = match_target_in_catalog(catalog, productos, action.get("target", ""))
                 if not prod:
-                    return True  # No se informa al usuario que no se encontraron imágenes
+                    return True  # No se informa al usuario
 
-                urls = var["images"] if var else [img["url"] for img in prod.get("product_images", []) if img.get("variant_id") is None]
+                urls = []
+
+                # Si es variante, buscar sus imágenes
+                if var:
+                    variant_label = var.get("label")
+                    urls = [
+                        img["url"]
+                        for img in prod.get("product_images", [])
+                        if img.get("variant_label") == variant_label
+                    ]
+                else:
+                    urls = [
+                        img["url"]
+                        for img in prod.get("product_images", [])
+                        if img.get("variant_id") is None
+                    ]
+
                 if not urls:
-                    return True  # No se informa al usuario que no se encontraron imágenes
+                    return True  # No se informa al usuario
 
                 display = var["label"] if var else prod["name"]
                 await send_whatsapp_message(from_number, f"Aquí las imágenes de *{display}*:")
@@ -216,6 +227,7 @@ async def handle_user_message(body: dict):
             except Exception:
                 print("⚠️ Error en handle_image_request:\n", traceback.format_exc())
                 return False
+
 
         handled = await handle_image_request()
         if handled:
