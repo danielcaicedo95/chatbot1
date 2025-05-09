@@ -167,16 +167,14 @@ async def handle_user_message(body: dict):
                         "Tu tarea es detectar si el usuario quiere ver una imagen de un producto o variante.",
                         "Si el usuario quiere una imagen, responde con JSON plano (sin Markdown) así:",
                         "  {\"want_images\": true, \"target\": \"nombre del producto o variante exacta\"}",
-                        "Si no quiere imágenes, responde con:",
-                        "  {\"want_images\": false}",
-                        "",
+                        "Si no quiere imágenes, responde con: {\"want_images\": false}",
                         "Ejemplos de solicitudes de imagen:",
-                        "- '¿Tienes una foto del tequila?'",
-                        "- 'Muéstrame cómo es el ron Medellín añejo'",
-                        "- '¿Puedes mostrarme una imagen?'",
-                        "- 'Quiero ver cómo es el vodka que dijiste'",
-                        "",
-                        "Nunca respondas con texto o explicaciones. Solo devuelve el JSON."
+                        "- '¿Tienes fotos del tequila?'",
+                        "- 'Muéstrame cómo es el ron Medellín añejo en una imagen'",
+                        "- '¿Puedes mostrarme una foto?'",
+                        "- 'Quiero ver cómo se ve el vodka que mencionaste'",
+                        "- '¿Me puedes enviar una fotografía del producto?'",
+                        "- '¿Tienes una imagen del tequila azul?'"
                     ]
                 }
 
@@ -188,8 +186,7 @@ async def handle_user_message(body: dict):
                 if not match:
                     raise ValueError("No se encontró JSON en la respuesta del modelo.")
                 action = json.loads(match.group())
-
-                if not action.get("want_images"):
+                if not action.get("want_images", False):
                     return False
 
                 prod, var = match_target_in_catalog(catalog, productos, action.get("target", ""))
@@ -214,19 +211,22 @@ async def handle_user_message(body: dict):
                     ]
 
                 if not urls:
+                    await send_whatsapp_message(from_number, "No tenemos imágenes disponibles para este producto.")
                     return True  # No se informa al usuario
 
                 display = var["label"] if var else prod["name"]
-                await send_whatsapp_message(from_number, f"Aquí las imágenes de *{display}*:")
+                await send_whatsapp_message(from_number, f"Aquí las imágenes de *{display}*:")  # Enviar mensaje inicial
                 for u in urls:
                     try:
                         await send_whatsapp_image(from_number, u, caption=display)
-                    except Exception:
-                        print(f"❌ Error enviando imagen {u}")
+                    except Exception as e:
+                        print(f"❌ Error enviando imagen {u}: {e}")
+                        continue  # Continúa con la siguiente imagen
                 return True
             except Exception:
                 print("⚠️ Error en handle_image_request:\n", traceback.format_exc())
                 return False
+
 
 
         handled = await handle_image_request()
@@ -274,15 +274,26 @@ async def handle_user_message(body: dict):
             "{\"order_details\":{\"name\":\"NOMBRE\",\"address\":\"DIRECCIÓN\",\"phone\":\"TELÉFONO\",\"payment_method\":\"TIPO_PAGO\",\"products\":[{\"name\":\"NOMBRE\",\"quantity\":1,\"price\":0}],\"total\":0}}"
         )
 
+        # Obtener respuesta de Gemini
         hist2 = [m for m in user_histories[from_number] if m["role"] in ("user", "model")]
         llm_resp2 = await ask_gemini_with_history(hist2 + [{"role": "user", "text": instrucciones}])
+
+        # Extraer los datos y verificar clean_text
         order_data, clean_text = extract_order_data(llm_resp2)
 
-        user_histories[from_number].append({
-            "role": "model",
-            "text": clean_text,
-            "time": datetime.utcnow().isoformat()
-        })
+        # Verificar si clean_text es None o vacío antes de continuar
+        if not clean_text:
+            print("⚠️ clean_text es None o vacío. No se enviará el mensaje.")
+        else:
+            user_histories[from_number].append({
+                "role": "model",
+                "text": clean_text,
+                "time": datetime.utcnow().isoformat()
+            })
+
+            # Ahora puedes enviar el mensaje de WhatsApp
+            await send_whatsapp_message(from_number, clean_text)
+
         await save_message_to_supabase(from_number, "model", clean_text)
 
         if order_data and order_data.get("products"):
