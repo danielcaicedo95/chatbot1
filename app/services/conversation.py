@@ -42,6 +42,11 @@ async def handle_user_message(body: dict):
         productos = await get_all_products()
         if not productos:
             return  # No se informa al usuario del error
+        
+        handled = await handle_image_request()
+        if handled:
+            return
+
 
         def extract_labels(obj):
             labels = []
@@ -118,6 +123,41 @@ async def handle_user_message(body: dict):
                         prod = next(p for p in productos if p["name"] == entry["name"])
                         return prod, None
             return None, None
+        
+        
+        def match_target_in_catalog(catalog, productos, target):
+            target = target.strip().lower()
+
+            for entry in catalog:
+                for v in entry["variants"]:
+                    if v["value"] == target:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        return prod, v
+            for entry in catalog:
+                if entry["name"].lower() == target:
+                    prod = next(p for p in productos if p["name"] == entry["name"])
+                    return prod, None
+            for entry in catalog:
+                for v in entry["variants"]:
+                    if v["value"] in target:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        return prod, v
+            choices = [v["value"] for e in catalog for v in e["variants"]] + [e["name"].lower() for e in catalog]
+            match = get_close_matches(target, choices, n=1, cutoff=0.5)
+            if match:
+                m0 = match[0]
+                for entry in catalog:
+                    for v in entry["variants"]:
+                        if v["value"] == m0:
+                            prod = next(p for p in productos if p["name"] == entry["name"])
+                            return prod, v
+                for entry in catalog:
+                    if entry["name"].lower() == m0:
+                        prod = next(p for p in productos if p["name"] == entry["name"])
+                        return prod, None
+            return None, None
+
+
 
         async def handle_image_request():
             try:
@@ -126,10 +166,19 @@ async def handle_user_message(body: dict):
                     "user_request": raw_text,
                     "catalog": catalog,
                     "instructions": [
-                        "Devuelve JSON EXACTO sin Markdown:",
-                        "  {'want_images': true, 'target': 'valor variante o nombre producto'}",
-                        "o si no pide imágenes:",
-                        "  {'want_images': false}"
+                        "Tu tarea es detectar si el usuario quiere ver una imagen de un producto o variante.",
+                        "Si el usuario quiere una imagen, responde con JSON plano (sin Markdown) así:",
+                        "  {\"want_images\": true, \"target\": \"nombre del producto o variante exacta\"}",
+                        "Si no quiere imágenes, responde con:",
+                        "  {\"want_images\": false}",
+                        "",
+                        "Ejemplos de solicitudes de imagen:",
+                        "- '¿Tienes una foto del tequila?'",
+                        "- 'Muéstrame cómo es el ron Medellín añejo'",
+                        "- '¿Puedes mostrarme una imagen?'",
+                        "- 'Quiero ver cómo es el vodka que dijiste'",
+                        "",
+                        "Nunca respondas con texto o explicaciones. Solo devuelve el JSON."
                     ]
                 }
 
@@ -137,7 +186,11 @@ async def handle_user_message(body: dict):
                 llm_input = hist[-10:] + [{"role": "user", "text": json.dumps(prompt_obj, ensure_ascii=False)}]
                 llm_resp = await ask_gemini_with_history(llm_input)
 
-                action = json.loads(re.search(r"\{[\s\S]*\}", llm_resp).group())
+                match = re.search(r"\{[\s\S]*\}", llm_resp)
+                if not match:
+                    raise ValueError("No se encontró JSON en la respuesta del modelo.")
+                action = json.loads(match.group())
+
 
                 if not action.get("want_images"):
                     return False
